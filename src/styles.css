@@ -355,6 +355,28 @@ button {
 .connection-dialog .dialog-heading {
   margin-bottom:20px;
 }
+.account-picker-wallet {
+  margin:-7px 0 16px;
+  font-size:12px;
+  color:var(--muted);
+}
+.account-option {
+  width:100%;
+  padding:14px;
+  border:1px solid var(--line);
+  border-radius:9px;
+  background:#f8f9f5;
+  color:var(--ink);
+  text-align:left;
+  font-size:12px;
+  line-height:1.7;
+  overflow-wrap:anywhere;
+}
+.account-option small {
+  display:block;
+  color:var(--muted);
+  font-size:11px;
+}
 .close-dialog {
   display:grid;
   place-items:center;

@@ -3,7 +3,9 @@ import { skipToken, useQuery } from '@tanstack/react-query'
 import { AccountCompatibilityError, validateSource, validateSponsor } from './lib/accounts'
 import { validateRecipient } from './lib/operation'
 import { formatUnits, getAddress, isAddress, zeroAddress, type Address, type Hex } from 'viem'
-import { useWallet } from './hooks/useWallet'
+import { useWallet, type AccountChoice } from './hooks/useWallet'
+import { AccountPicker } from './components/AccountPicker'
+import { WalletSelectionCancelled, type WalletRole } from './lib/walletSessions'
 import { DEFAULT_CHAIN_ID, NETWORKS, getNetwork } from './lib/chain'
 import { createShareUrl, loadSignedTransfer } from './lib/envelope'
 import { SubmissionUnknownError, broadcastTransfer, formatError, parseAmount, prepareTransfer, quoteTransfer, readAsset, signTransfer, validateBroadcastHash, waitForTransfer } from './lib/transfer'
@@ -91,6 +93,13 @@ export default function App() {
   sponsorRef.current = sponsorWallet
   const [choosingWallet, setChoosingWallet] = useState<'source' | 'sponsor' | null>(null)
   const walletDialog = useRef<HTMLDialogElement>(null)
+  const [accountChoice, setAccountChoice] = useState<{
+    choice: AccountChoice
+    role: WalletRole
+    blockedAddress: Address | null
+    onSelect: (address: Address) => void
+    onCancel: () => void
+  } | null>(null)
   const [assetChoice, setAssetChoice] = useState<'native' | 'wrapped' | 'custom'>('wrapped')
   const [customAddress, setCustomAddress] = useState('')
   const [tokenTouched, setTokenTouched] = useState(false)
@@ -219,9 +228,19 @@ export default function App() {
 
   function connectWallet(id: string) {
     if (!choosingWallet) return
+    const role = choosingWallet
     const selected = choosingWallet === 'source' ? wallet : sponsorWallet
     setChoosingWallet(null)
-    void run('Connecting wallet…', () => selected.connect(id))
+    void run('Connecting wallet…', () => selected.connect(id, async choice => {
+      const blockedAddress = role === 'source' ? sponsorRef.current.address : sourceAddress
+      if (choice.accounts.length === 1 && choice.accounts[0].toLowerCase() !== blockedAddress?.toLowerCase()) return choice.accounts[0]
+      return new Promise<Address>((resolve, reject) => {
+        setAccountChoice({ choice, role, blockedAddress,
+          onSelect: address => { setAccountChoice(null); resolve(address) },
+          onCancel: () => { setAccountChoice(null); reject(new WalletSelectionCancelled()) },
+        })
+      })
+    }))
   }
 
   function edit(update: () => void) {
@@ -404,6 +423,8 @@ export default function App() {
         <button className="source-wallet" aria-label="WalletConnect" onClick={() => connectWallet('walletConnect')}><span className="source-icon"><Icon name="wallet" /></span><span><strong>WalletConnect</strong><small>Mobile wallets and QR code</small></span><Icon name="arrow" size={18} /></button>
       </div>
     </dialog>
+
+    {accountChoice ? <AccountPicker {...accountChoice} /> : null}
 
     <dialog ref={restartDialog} className="wallet-dialog" onCancel={() => setRestartModal(false)} aria-labelledby="restart-title"><div className="dialog-heading"><h2 id="restart-title">Leave this transfer?</h2></div><p className="dialog-description">Starting over does not revoke your signature. Save the payment link to return to this transfer.</p><button className="primary full" onClick={() => setRestartModal(false)}>Keep this transfer</button><button className="text-button full" onClick={reset}>Start over anyway</button></dialog>
   </div>

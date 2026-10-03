@@ -54,11 +54,15 @@ export class WalletSessions {
   }
   setError(role: WalletRole, error: unknown) { this.update(role, { error: walletError(error) }) }
   private other(role: WalletRole) { return role === 'source' ? 'sponsor' : 'source' }
-  ownsOther(role: WalletRole, id: string) { return this.bindings[this.other(role)]?.transport.id === id }
-  private assertDistinct(role: WalletRole, address: Address, id: string, resource?: object) {
+  isResourceBound(resource: object) { return Object.values(this.bindings).some(binding => binding.transport.resource === resource) }
+  private async disconnectUnused(transport: RoleTransport) {
+    const bound = Object.values(this.bindings).some(binding => binding.transport.id === transport.id || (transport.resource && binding.transport.resource === transport.resource))
+    if (!bound) await transport.disconnect()
+  }
+  private assertDistinct(role: WalletRole, address: Address) {
     const other = this.states[this.other(role)]
-    if ((other.address && same(other.address, address)) || this.ownsOther(role, id) || (resource && this.bindings[this.other(role)]?.transport.resource === resource)) {
-      throw new Error('Choose a different account and wallet connection for each role.')
+    if (other.address && same(other.address, address)) {
+      throw new Error('Choose a different account for each role.')
     }
   }
   async connect(role: WalletRole, create: () => Promise<RoleTransport>) {
@@ -69,7 +73,7 @@ export class WalletSessions {
       candidate = await create()
       const state = await candidate.read()
       if (epoch !== this.epochs[role]) throw new WalletSelectionCancelled()
-      this.assertDistinct(role, state.address, candidate.id, candidate.resource)
+      this.assertDistinct(role, state.address)
       const previous = this.bindings[role]
       const transport = candidate
       const stop = transport.subscribe(next => {
@@ -82,7 +86,7 @@ export class WalletSessions {
         }
         const current = this.states[role]
         let error: string | null = null
-        try { this.assertDistinct(role, next.address, transport.id, transport.resource) } catch (cause) { error = walletError(cause) }
+        try { this.assertDistinct(role, next.address) } catch (cause) { error = walletError(cause) }
         this.update(role, { ...next, error,
           connectionId: current.address && same(current.address, next.address) ? current.connectionId : `${transport.id}:${++this.revision}`,
         })
@@ -91,14 +95,12 @@ export class WalletSessions {
       this.bindings[role] = { transport, stop }
       this.update(role, { ...state, walletName: cleanWalletName(transport.name), connectionId: `${transport.id}:${++this.revision}`, error: null, syncing: false })
       candidate = undefined
-      if (previous && previous.transport !== transport && previous.transport.id !== transport.id && (!transport.resource || previous.transport.resource !== transport.resource)) {
-        // The new role binding is already committed; old-session cleanup cannot replace it.
-        void previous.transport.disconnect().catch(() => {})
+      if (previous) {
+        // Shared injected providers stay authorized until their final role is released.
+        void this.disconnectUnused(previous.transport).catch(() => {})
       }
     } catch (error) {
-      if (candidate && candidate.id !== this.bindings[role]?.transport.id && !this.ownsOther(role, candidate.id) && (!candidate.resource || this.bindings[this.other(role)]?.transport.resource !== candidate.resource)) {
-        await candidate.disconnect().catch(() => {})
-      }
+      if (candidate) await this.disconnectUnused(candidate).catch(() => {})
       if (epoch === this.epochs[role] && !(error instanceof WalletSelectionCancelled)) this.setError(role, error)
       throw error
     }
@@ -109,7 +111,7 @@ export class WalletSessions {
     binding?.stop()
     delete this.bindings[role]
     this.update(role, empty())
-    try { await binding?.transport.disconnect() }
+    try { if (binding) await this.disconnectUnused(binding.transport) }
     catch (cause) { this.setError(role, cause) }
   }
   async ensureChain(role: WalletRole, chainId: number): Promise<EIP1193Provider> {
@@ -121,7 +123,7 @@ export class WalletSessions {
       if (this.bindings[role] !== binding || this.states[role].connectionId !== expected.connectionId) {
         throw new Error('The account changed. Try again with the selected account.')
       }
-      this.assertDistinct(role, expected.address!, binding.transport.id, binding.transport.resource)
+      this.assertDistinct(role, expected.address!)
     }
     const check = async (requireChain = true) => {
       identity()

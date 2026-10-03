@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState, useSyncExternalStore } from 'react'
 import { connectRole, getAvailableWallets, walletSessions, watchWallets } from '../lib/walletKit'
+import type { SelectWalletAccount } from '../lib/walletInjected'
+export type { AccountChoice, SelectWalletAccount } from '../lib/walletInjected'
 import { WalletSelectionCancelled, type WalletRole } from '../lib/walletSessions'
 
 export function useWallet(role: WalletRole, targetChainId: number) {
@@ -11,8 +13,8 @@ export function useWallet(role: WalletRole, targetChainId: number) {
     if (state.connectionId) void ensureChain(targetChainId).catch(() => {})
     // A wallet-side chain change must not trigger repeated approval prompts.
   }, [state.connectionId, targetChainId, ensureChain])
-  const connect = useCallback(async (walletId: string) => {
-    try { await connectRole(role, walletId, targetChainId) }
+  const connect = useCallback(async (walletId: string, selectAccount: SelectWalletAccount) => {
+    try { await connectRole(role, walletId, targetChainId, selectAccount) }
     catch (error) { if (!(error instanceof WalletSelectionCancelled)) walletSessions.setError(role, error) }
   }, [role, targetChainId])
   const disconnect = useCallback(() => walletSessions.disconnect(role), [role])

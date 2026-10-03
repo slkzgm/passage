@@ -75,6 +75,7 @@ export default function App() {
   const [recipient, setRecipient] = useState('')
   const [prepared, setPrepared] = useState<PreparedTransfer>()
   const [signed, setSigned] = useState<SignedTransfer>()
+  const [payerSelectionStarted, setPayerSelectionStarted] = useState(false)
   const [acknowledged, setAcknowledged] = useState(false)
   const [quote, setQuote] = useState<GasQuote>()
   const [txHash, setTxHash] = useState<Hex>()
@@ -181,7 +182,17 @@ export default function App() {
   }
 
   function openWallet() {
-    void run('Opening wallet…', () => wallet.address ? wallet.switchAccount() : wallet.connect())
+    void run('Opening wallet…', () => wallet.address ? wallet.manageWallet() : wallet.connect())
+  }
+
+  async function selectPayingWallet() {
+    await run('Opening wallets…', async () => {
+      if (!signed || txHash || submissionUnknown) return
+      setQuote(undefined)
+      setPayerSelectionStarted(true)
+      // The authorization is independent of the wallet connection that created it.
+      await wallet.connect({ replace: true })
+    })
   }
 
   function edit(update: () => void) {
@@ -273,7 +284,7 @@ export default function App() {
   function reset() {
     if (actionLock.current) return
     formVersion.current += 1
-    setPrepared(undefined); setSigned(undefined); setQuote(undefined); setResult(undefined); setTxHash(undefined); setSubmissionUnknown(undefined); setRecoveryHash('')
+    setPrepared(undefined); setSigned(undefined); setPayerSelectionStarted(false); setQuote(undefined); setResult(undefined); setTxHash(undefined); setSubmissionUnknown(undefined); setRecoveryHash('')
     setAssetChoice('wrapped'); setCustomAddress('')
     setTokenTouched(false); setRecipientTouched(false)
     setAmount(''); setRecipient(''); setAcknowledged(false); setShareUrl(''); setCopied(false); setError(''); setRestartModal(false)
@@ -331,7 +342,8 @@ export default function App() {
               </form>
               <p className="signed-note">Closing this page does not revoke the signed authorization.</p>
             </> : !txHash ? <>
-              <div className="sponsor-section"><div className="label-row"><span className="field-label">Paying wallet</span>{sponsorReady ? <span className="connection-state">Ready</span> : null}</div><button className="source-wallet" disabled={Boolean(busy)} onClick={() => openWallet()}><span className="source-icon"><Icon name="wallet" /></span><span><strong>{wallet.address && !isSource ? shortAddress(wallet.address) : 'Select paying wallet'}</strong><small>{wallet.address && !isSource ? wallet.walletName : `A different account with ${nativeCurrency.symbol}`}</small></span><Icon name="arrow" size={18} /></button></div>
+              <div className="sponsor-section"><div className="label-row"><span className="field-label">Paying wallet</span>{sponsorReady ? <span className="connection-state">Ready</span> : null}</div><button className="source-wallet" aria-label={sponsorAddress ? 'Change paying wallet' : 'Select paying wallet'} disabled={Boolean(busy)} onClick={() => void selectPayingWallet()}><span className="source-icon"><Icon name="wallet" /></span><span><strong>{sponsorAddress ? shortAddress(sponsorAddress) : 'Select paying wallet'}</strong><small>{sponsorAddress ? `${wallet.walletName} · Change wallet` : `A different account with ${nativeCurrency.symbol}`}</small></span><Icon name="arrow" size={18} /></button></div>
+              {payerSelectionStarted && isSource && !busy ? <p className="notice" role="status">This is the sending account. Choose a different account in your wallet, then reconnect.</p> : null}
               {sponsorStatus}
               {activeQuote ? <div className="fee-review"><div><span>Fee budget</span><strong>{formatUnits(activeQuote.maxCost, nativeCurrency.decimals)} {nativeCurrency.symbol}</strong></div></div> : null}
               {activeQuote ? <Button className="primary full" disabled={Boolean(busy) || !sourceReady || !sponsorReady} busy={Boolean(busy)} onClick={() => void send()}>{busy || 'Pay fees and send'}{!busy ? <Icon name="arrow" size={18} /> : null}</Button> : <Button className="primary full" disabled={Boolean(busy) || !sourceReady || !sponsorReady || !wallet.address || isSource} busy={Boolean(busy)} onClick={() => void estimate()}>{busy || 'Estimate fees'}{!busy ? <Icon name="arrow" size={18} /> : null}</Button>}

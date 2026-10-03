@@ -21,14 +21,24 @@ export function useWallet() {
   const { switchChainAsync } = useSwitchChain()
   const [error, setError] = useState<string | null>(walletConfigurationError)
 
-  const connect = useCallback(async () => {
+  const connect = useCallback(async ({ replace = false }: { replace?: boolean } = {}) => {
     if (!walletKit) { setError(walletConfigurationError); return }
     setError(null)
-    try { await walletKit.open({ view: 'Connect', namespace: 'eip155' }) }
+    try {
+      if (replace && getAccount(walletConfig).isConnected) {
+        // A WalletConnect session otherwise reuses the sending wallet on mobile.
+        await walletKit.disconnect('eip155')
+        if (getAccount(walletConfig).isConnected) {
+          setError('The current wallet is still connected. Disconnect it and try again.')
+          return
+        }
+      }
+      await walletKit.open({ view: 'Connect', namespace: 'eip155' })
+    }
     catch (cause) { setError(walletError(cause)) }
   }, [])
 
-  const switchAccount = useCallback(async () => {
+  const manageWallet = useCallback(async () => {
     if (!walletKit) { setError(walletConfigurationError); return }
     setError(null)
     try {
@@ -81,7 +91,7 @@ export function useWallet() {
     walletName: account.isConnected ? account.connector?.name.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, '').slice(0, 64) ?? 'Wallet' : null,
     error,
     connect,
-    switchAccount,
+    manageWallet,
     ensureChain,
   }
 }

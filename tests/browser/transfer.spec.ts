@@ -16,6 +16,8 @@ let sends = 0
 let loseSendResponse = false
 let lastBroadcastHash: Hex | undefined
 let walletChainId = DEFAULT_CHAIN_ID
+let payingChainId = DEFAULT_CHAIN_ID
+let providerRequests: { provider: 'source' | 'paying'; role: 'source' | 'sponsor'; method: string }[] = []
 let networkSwitches: number[] = []
 let signingChains: number[] = []
 let sendingChains: number[] = []
@@ -35,6 +37,8 @@ test.beforeEach(async ({ page }) => {
   loseSendResponse = false
   lastBroadcastHash = undefined
   walletChainId = DEFAULT_CHAIN_ID
+  payingChainId = DEFAULT_CHAIN_ID
+  providerRequests = []
   networkSwitches = []
   signingChains = []
   sendingChains = []
@@ -57,30 +61,35 @@ test.beforeEach(async ({ page }) => {
       await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ data: [], count: 0, isAnalyticsEnabled: false, features: [], planLimits: { tier: 'starter', isAboveMauLimit: false, isAboveRpcLimit: false } }) })
     }
   })
-  await page.exposeBinding('passageTestRequest', async (_, method: string, params: unknown, role: 'source' | 'sponsor') => {
+  await page.exposeBinding('passageTestRequest', async (_, method: string, params: unknown, role: 'source' | 'sponsor', provider: 'source' | 'paying' = 'source') => {
+    providerRequests.push({ provider, role, method })
+    const currentChainId = provider === 'paying' ? payingChainId : walletChainId
     const account = role === 'source' ? source : sponsor
     if (method === 'eth_accounts' || method === 'eth_requestAccounts') return [account.address]
-    if (method === 'eth_chainId') return toHex(walletChainId)
+    if (method === 'eth_chainId') return toHex(currentChainId)
     if (method === 'passage_setChain') { walletChainId = (params as number[])[0]; return null }
     if (method === 'wallet_getPermissions' || method === 'wallet_requestPermissions') return [{ parentCapability: 'eth_accounts' }]
     if (method === 'wallet_getCapabilities') return {}
+    if (method === 'wallet_revokePermissions') return null
     if (method === 'wallet_switchEthereumChain') {
-      walletChainId = Number((params as { chainId: string }[])[0].chainId)
-      networkSwitches.push(walletChainId)
+      const nextChainId = Number((params as { chainId: string }[])[0].chainId)
+      if (provider === 'paying') payingChainId = nextChainId
+      else walletChainId = nextChainId
+      networkSwitches.push(nextChainId)
       return null
     }
     if (method === 'eth_signTypedData_v4') {
       const data = JSON.parse((params as string[])[1])
-      expect(walletChainId).toBe(DEFAULT_CHAIN_ID)
+      expect(currentChainId).toBe(DEFAULT_CHAIN_ID)
       expect(Number(data.domain.chainId)).toBe(DEFAULT_CHAIN_ID)
-      signingChains.push(walletChainId)
+      signingChains.push(currentChainId)
       return account.signTypedData(data)
     }
     if (method === 'eth_sendTransaction') {
       const tx = (params as Record<string, string>[])[0]
-      expect(walletChainId).toBe(DEFAULT_CHAIN_ID)
+      expect(currentChainId).toBe(DEFAULT_CHAIN_ID)
       expect(Number(tx.chainId)).toBe(DEFAULT_CHAIN_ID)
-      sendingChains.push(walletChainId)
+      sendingChains.push(currentChainId)
       expect(tx.from.toLowerCase()).toBe(sponsor.address.toLowerCase())
       expect(tx.to.toLowerCase()).toBe(ENTRY_POINT.toLowerCase())
       sends++
@@ -97,33 +106,43 @@ test.beforeEach(async ({ page }) => {
   })
   await page.addInitScript(({ sponsorAddress }) => {
     const win = window as typeof window & {
-      passageTestRequest: (method: string, params: unknown, role: string) => Promise<unknown>
+      passageTestRequest: (method: string, params: unknown, role: string, provider?: string) => Promise<unknown>
       passageSelectSponsor: () => void
       passageSetChain: (chainId: number) => Promise<void>
       ethereum: unknown
     }
     let role = 'source'
-    const listeners = new Map<string, Set<(...args: unknown[]) => void>>()
-    const provider = {
-      isMetaMask: true,
-      isConnected: () => true,
-      request: async ({ method, params }: { method: string; params: unknown }) => {
-        const response = await win.passageTestRequest(method, params, role)
-        if (method === 'wallet_switchEthereumChain') {
-          for (const fn of listeners.get('chainChanged') ?? []) fn((params as { chainId: string }[])[0].chainId)
-        }
-        return response
-      },
-      on: (event: string, fn: (...args: unknown[]) => void) => { if (!listeners.has(event)) listeners.set(event, new Set()); listeners.get(event)!.add(fn) },
-      removeListener: (event: string, fn: (...args: unknown[]) => void) => listeners.get(event)?.delete(fn),
+    function createProvider(id: 'source' | 'paying', getRole: () => string) {
+      const listeners = new Map<string, Set<(...args: unknown[]) => void>>()
+      const provider = {
+        isMetaMask: id === 'source',
+        isConnected: () => true,
+        request: async ({ method, params }: { method: string; params: unknown }) => {
+          const response = await win.passageTestRequest(method, params, getRole(), id)
+          if (method === 'wallet_switchEthereumChain') {
+            for (const fn of listeners.get('chainChanged') ?? []) fn((params as { chainId: string }[])[0].chainId)
+          }
+          return response
+        },
+        on: (event: string, fn: (...args: unknown[]) => void) => { if (!listeners.has(event)) listeners.set(event, new Set()); listeners.get(event)!.add(fn) },
+        removeListener: (event: string, fn: (...args: unknown[]) => void) => listeners.get(event)?.delete(fn),
+      }
+      return { provider, listeners }
     }
-    win.ethereum = provider
+    const sourceWallet = createProvider('source', () => role)
+    const payingWallet = createProvider('paying', () => 'sponsor')
+    win.ethereum = sourceWallet.provider
     win.passageSetChain = async chainId => {
-      await win.passageTestRequest('passage_setChain', [chainId], role)
-      for (const fn of listeners.get('chainChanged') ?? []) fn(`0x${chainId.toString(16)}`)
+      await win.passageTestRequest('passage_setChain', [chainId], role, 'source')
+      for (const fn of sourceWallet.listeners.get('chainChanged') ?? []) fn(`0x${chainId.toString(16)}`)
     }
-    win.passageSelectSponsor = () => { role = 'sponsor'; for (const fn of listeners.get('accountsChanged') ?? []) fn([sponsorAddress]) }
-    const announce = () => window.dispatchEvent(new CustomEvent('eip6963:announceProvider', { detail: { info: { uuid: 'cce3612e-ab43-47ed-9b16-1e1b8034f036', name: 'Passage Test Wallet', icon: 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg"/>', rdns: 'test.passage.wallet' }, provider } }))
+    win.passageSelectSponsor = () => { role = 'sponsor'; for (const fn of sourceWallet.listeners.get('accountsChanged') ?? []) fn([sponsorAddress]) }
+    const announce = () => {
+      for (const detail of [
+        { info: { uuid: 'cce3612e-ab43-47ed-9b16-1e1b8034f036', name: 'Passage Test Wallet', rdns: 'test.passage.wallet' }, provider: sourceWallet.provider },
+        { info: { uuid: '802ed602-f05e-4f07-b947-b169be464bf7', name: 'Passage Paying Wallet', rdns: 'test.passage.paying' }, provider: payingWallet.provider },
+      ]) window.dispatchEvent(new CustomEvent('eip6963:announceProvider', { detail: { ...detail, info: { ...detail.info, icon: 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg"/>' } } }))
+    }
     window.addEventListener('eip6963:requestProvider', announce)
     announce()
   }, { sponsorAddress: sponsor.address })
@@ -158,6 +177,18 @@ async function connectSource(page: Page) {
 async function fillValidTransfer(page: Page) {
   await page.getByLabel('Amount', { exact: true }).fill('0.001')
   await page.getByLabel('Recipient address', { exact: true }).fill(recipient)
+}
+
+async function signWithSource(page: Page) {
+  await connectSource(page)
+  await fillValidTransfer(page)
+  await page.getByRole('button', { name: 'Review transfer', exact: true }).click()
+  await expect(page.getByRole('heading', { name: 'Review transfer' })).toBeVisible({ timeout: 30_000 })
+  await page.getByRole('checkbox').check()
+  await page.getByRole('button', { name: 'Sign transfer', exact: true }).click()
+  await expect(page.getByRole('heading', { name: 'Pay network fees', exact: true })).toBeVisible({ timeout: 30_000 })
+  await page.getByRole('button', { name: 'Copy payment link', exact: true }).click()
+  return page.getByLabel('Payment link', { exact: true }).inputValue()
 }
 
 function expectNoWalletAction() {
@@ -531,6 +562,64 @@ test('a fee budget expires automatically without submitting a transaction', asyn
   await expect(page.getByRole('button', { name: 'Pay fees and send', exact: true })).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Estimate fees', exact: true })).toBeVisible()
   expect(signingChains).toEqual([DEFAULT_CHAIN_ID])
+  expect(sends).toBe(0)
+})
+
+test('mobile paying-wallet picker connects a separate provider and completes the transfer', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  const before = await client.readContract({ address: WETH, abi: erc20Abi, functionName: 'balanceOf', args: [recipient] })
+  const paymentLink = await signWithSource(page)
+  const summary = await page.locator('.transfer-summary').innerText()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  await page.getByRole('button', { name: 'Select paying wallet', exact: true }).click()
+  await page.getByText('Passage Paying Wallet', { exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Change paying wallet', exact: true })).toBeVisible()
+  await expect(page.getByLabel('Payment link', { exact: true })).toHaveValue(paymentLink)
+  await expect(page.locator('.transfer-summary')).toHaveText(summary, { useInnerText: true })
+  await page.getByRole('button', { name: 'Estimate fees', exact: true }).click()
+  await expect(page.getByText('Fee budget', { exact: true })).toBeVisible({ timeout: 30_000 })
+  await page.getByRole('button', { name: 'Pay fees and send', exact: true }).click()
+  await expect(page.getByRole('heading', { name: 'Transfer complete', exact: true })).toBeVisible({ timeout: 40_000 })
+  expect(providerRequests.filter(request => request.method === 'eth_signTypedData_v4')).toEqual([{ provider: 'source', role: 'source', method: 'eth_signTypedData_v4' }])
+  expect(providerRequests.filter(request => request.method === 'eth_sendTransaction')).toEqual([{ provider: 'paying', role: 'sponsor', method: 'eth_sendTransaction' }])
+  expect(sends).toBe(1)
+  expect(await client.readContract({ address: WETH, abi: erc20Abi, functionName: 'balanceOf', args: [recipient] })).toBe(before + parseEther('0.001'))
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+})
+
+test('paying-wallet picker cancellation, source reselection and payer changes preserve the authorization', async ({ page }) => {
+  const paymentLink = await signWithSource(page)
+  const summary = await page.locator('.transfer-summary').innerText()
+  const selectPayer = page.getByRole('button', { name: 'Select paying wallet', exact: true })
+  await selectPayer.click()
+  await expect(page.getByText('Passage Paying Wallet', { exact: true })).toBeVisible()
+  await page.getByTestId('w3m-header-close').click()
+  await expect(page.getByText('Passage Paying Wallet', { exact: true })).toBeHidden()
+  await expect(page.getByRole('heading', { name: 'Pay network fees', exact: true })).toBeVisible()
+  await expect(page.getByLabel('Payment link', { exact: true })).toHaveValue(paymentLink)
+  await expect(page.locator('.transfer-summary')).toHaveText(summary, { useInnerText: true })
+  await expect(page.getByRole('button', { name: 'Estimate fees', exact: true })).toBeDisabled()
+  await selectPayer.click()
+  await page.getByText('Passage Test Wallet', { exact: true }).click()
+  await expect(page.getByText('This is the sending account. Choose a different account in your wallet, then reconnect.', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Estimate fees', exact: true })).toBeDisabled()
+  await expect(page.getByLabel('Payment link', { exact: true })).toHaveValue(paymentLink)
+  await selectPayer.click()
+  await page.getByText('Passage Paying Wallet', { exact: true }).click()
+  await page.getByRole('button', { name: 'Estimate fees', exact: true }).click()
+  await expect(page.getByText('Fee budget', { exact: true })).toBeVisible({ timeout: 30_000 })
+  await page.getByRole('button', { name: 'Change paying wallet', exact: true }).click()
+  await expect(page.getByText('Passage Paying Wallet', { exact: true })).toBeVisible()
+  await expect(page.getByText('Fee budget', { exact: true })).toHaveCount(0)
+  await page.getByTestId('w3m-header-close').click()
+  await expect(page.getByLabel('Payment link', { exact: true })).toHaveValue(paymentLink)
+  await expect(page.locator('.transfer-summary')).toHaveText(summary, { useInnerText: true })
+  await selectPayer.click()
+  await page.getByText('Passage Paying Wallet', { exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Estimate fees', exact: true })).toBeEnabled()
+  await expect(page.getByRole('button', { name: 'Pay fees and send', exact: true })).toHaveCount(0)
+  expect(providerRequests.filter(request => request.method === 'eth_signTypedData_v4')).toEqual([{ provider: 'source', role: 'source', method: 'eth_signTypedData_v4' }])
+  expect(providerRequests.filter(request => request.method === 'eth_sendTransaction')).toEqual([])
   expect(sends).toBe(0)
 })
 

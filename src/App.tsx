@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode, type ButtonHTMLAttributes } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode, type ButtonHTMLAttributes, type CSSProperties } from 'react'
 import { skipToken, useQuery } from '@tanstack/react-query'
 import { AccountCompatibilityError, validateSource, validateSponsor } from './lib/accounts'
 import { validateRecipient } from './lib/operation'
@@ -7,23 +7,38 @@ import { useWallet, type AccountChoice } from './hooks/useWallet'
 import { AccountPicker } from './components/AccountPicker'
 import { WalletSelectionCancelled, type WalletRole } from './lib/walletSessions'
 import { DEFAULT_CHAIN_ID, NETWORKS, getNetwork } from './lib/chain'
+import { base, bsc, mainnet, monad, robinhood } from 'viem/chains'
 import { createShareUrl, loadSignedTransfer } from './lib/envelope'
 import { SubmissionUnknownError, broadcastTransfer, formatError, parseAmount, prepareTransfer, quoteTransfer, readAsset, signTransfer, validateBroadcastHash, waitForTransfer } from './lib/transfer'
 import type { GasQuote, PreparedTransfer, SignedTransfer, Asset, TransferResult } from './lib/types'
 import { initialTransferFragment as initialFragment } from './lib/session'
+import { currentTheme, setTheme, subscribeTheme } from './lib/theme'
 
 let sharedTransfer: Promise<SignedTransfer> | undefined
+const chainLogos: Record<number, string> = { [mainnet.id]: '/logos/eth.webp', [base.id]: '/logos/base.webp', [bsc.id]: '/logos/bnb-chain.webp', [monad.id]: '/logos/monad.webp', [robinhood.id]: '/logos/robinhood.webp' }
+// Wrapped assets reuse their native logo; the symbol tells them apart.
+const nativeLogos: Record<string, string> = { ETH: '/logos/eth.webp', BNB: '/logos/bnb.webp', MON: '/logos/monad.webp' }
+// The customizable select draws option logos from this property (see styles.css).
+const logoStyle = (url: string | undefined) => (url ? { '--logo': `url(${url})` } : undefined) as CSSProperties | undefined
 const shortAddress = (value: string) => `${value.slice(0, 6)}…${value.slice(-4)}`
 
-function Icon({ name, size = 20 }: { name: 'arrow' | 'wallet' | 'check' | 'copy' | 'external'; size?: number }) {
+function Icon({ name, size = 20 }: { name: 'arrow' | 'wallet' | 'check' | 'copy' | 'external' | 'sun' | 'moon'; size?: number }) {
   const paths = {
     arrow: <><path d="M4 12h16M14 6l6 6-6 6" /></>,
     wallet: <><path d="M19 7V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2H5a2 2 0 0 1 0-4" /><path d="M21 12h-5v5h5" /></>,
     check: <path d="m5 12 4 4L19 6" />,
     copy: <><rect x="8" y="8" width="12" height="12" rx="2" /><path d="M16 8V4H4v12h4" /></>,
     external: <><path d="M14 4h6v6M20 4 10 14M10 4H4v16h16v-6" /></>,
+    sun: <><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" /></>,
+    moon: <path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5Z" />,
   }
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>
+}
+
+function ThemeToggle() {
+  const theme = useSyncExternalStore(subscribeTheme, currentTheme)
+  const next = theme === 'dark' ? 'light' : 'dark'
+  return <button type="button" className="theme-toggle" aria-label={`Switch to ${next} theme`} title={`Switch to ${next} theme`} onClick={() => setTheme(next)}><Icon name={theme === 'dark' ? 'sun' : 'moon'} size={18} /></button>
 }
 
 function AddressLink({ address, chainId }: { address: string; chainId: number }) {
@@ -61,8 +76,14 @@ function WalletCard({ label, wallet, chainId, disabled, onChoose, onDisconnect, 
   const actionLabel = label === 'Fomo wallet' ? label : 'sponsor wallet'
   const wrongChain = Boolean(wallet.address && wallet.chainId !== chainId)
   return <section className="wallet-role" aria-label={label}>
-    <div className="wallet-role-heading"><span className="field-label">{label}</span>{wallet.address ? <div className="wallet-role-actions"><button type="button" aria-label={`Change ${actionLabel}`} disabled={disabled || wallet.syncing} onClick={onChoose}>Change</button><button type="button" aria-label={`Disconnect ${actionLabel}`} disabled={disabled || wallet.syncing} onClick={onDisconnect}>Disconnect</button></div> : null}</div>
-    {wallet.address ? <div className="wallet-identity"><span className="source-icon"><Icon name="wallet" size={17} /></span><span><strong className="mono" title={wallet.address}>{shortAddress(wallet.address)}</strong><small>{wallet.walletName}</small></span><span className={`wallet-network-state${wrongChain ? ' needs-sync' : ''}`} role="status">{wallet.syncing ? <><span className="spinner" />Switching…</> : wrongChain ? 'Switch needed' : <Icon name="check" size={15} />}</span></div> : <button type="button" className="source-wallet" disabled={disabled || wallet.syncing} onClick={onChoose}><span className="source-icon"><Icon name="wallet" size={17} /></span><span><strong>Connect {actionLabel}</strong></span><Icon name="arrow" size={18} /></button>}
+    <div className="wallet-role-heading"><span className="field-label">{label}</span><span className="wallet-role-hint">{label === 'Fomo wallet' ? 'Holds and signs the assets' : 'Pays the network fees'}</span></div>
+    {wallet.address ? <div className="wallet-identity">
+      {/* Deterministic hue gives each address a recognizable avatar without extra assets. */}
+      <span className="wallet-avatar" style={{ '--hue': parseInt(wallet.address.slice(2, 6), 16) % 360 } as CSSProperties} aria-hidden="true" />
+      <span className="wallet-identity-text"><strong className="mono" title={wallet.address}>{shortAddress(wallet.address)}</strong><small>{wallet.walletName}</small></span>
+      <span className={`wallet-network-state${wrongChain ? ' needs-sync' : ''}`} role="status">{wallet.syncing ? <><span className="spinner" />Switching…</> : wrongChain ? 'Switch needed' : <Icon name="check" size={14} />}</span>
+      <span className="wallet-role-actions"><button type="button" aria-label={`Change ${actionLabel}`} disabled={disabled || wallet.syncing} onClick={onChoose}>Change</button><button type="button" aria-label={`Disconnect ${actionLabel}`} disabled={disabled || wallet.syncing} onClick={onDisconnect}>Disconnect</button></span>
+    </div> : <button type="button" className="source-wallet" disabled={disabled || wallet.syncing} onClick={onChoose}><span className="source-icon"><Icon name="wallet" size={17} /></span><span><strong>Connect {actionLabel}</strong></span><Icon name="arrow" size={18} /></button>}
     {wallet.error ? <p className="notice error" role="alert">{wallet.error}</p> : null}
     {wrongChain && !wallet.syncing ? <button type="button" className="text-button sync-network" aria-label={`Sync ${actionLabel} network`} disabled={disabled} onClick={onSync}>Switch to {getNetwork(chainId).name}</button> : null}
   </section>
@@ -181,6 +202,9 @@ export default function App() {
     try { validateRecipient(wallet.address, recipient, selectedAsset) }
     catch (reason) { recipientError = formatError(reason) }
   }
+
+  // Explains why "Review transfer" is disabled; validation errors and account checks already speak for themselves.
+  const reviewHint = !wallet.address ? 'Connect your Fomo wallet to get started.' : !amount ? 'Enter the amount to send.' : !recipient && recipientChoice === 'custom' ? 'Add the recipient address.' : ''
 
   useEffect(() => {
     if (!initialFragment) return
@@ -345,8 +369,8 @@ export default function App() {
 
   return <div className="app-shell">
     <header className="site-header">
-      <a href="/" className="brand" aria-label="Passage, home" onClick={event => { event.preventDefault(); if (!busy) signed && !confirmed ? setRestartModal(true) : reset() }}><span className="brand-symbol" aria-hidden="true"><i /><i /></span>passage<span className="brand-dot">.</span></a>
-      <div className="header-right"><select className="network-select" aria-label="Network" value={selectedChainId} disabled={controlsBusy || Boolean(prepared) || Boolean(signed)} onChange={event => { const next = Number(event.target.value); if (next !== selectedChainId) edit(() => { setSelectedChainId(next); setAssetChoice('wrapped'); setCustomAddress(''); setAmount(''); setTokenTouched(false) }) }}>{NETWORKS.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></div>
+      <a href="/" className="brand" aria-label="Passage, home" onClick={event => { event.preventDefault(); if (!busy) signed && !confirmed ? setRestartModal(true) : reset() }}><span className="brand-symbol" aria-hidden="true"><i /><i /></span><span className="brand-wordmark">passage<span className="brand-dot">.</span></span></a>
+      <div className="header-right"><ThemeToggle /><span className="network-picker"><img className="select-logo" src={chainLogos[selectedChainId]} alt="" /><select className="network-select" aria-label="Network" value={selectedChainId} disabled={controlsBusy || Boolean(prepared) || Boolean(signed)} onChange={event => { const next = Number(event.target.value); if (next !== selectedChainId) edit(() => { setSelectedChainId(next); setAssetChoice('wrapped'); setCustomAddress(''); setAmount(''); setTokenTouched(false) }) }}>{NETWORKS.map(item => <option key={item.id} value={item.id} style={logoStyle(chainLogos[item.id])}>{item.name}</option>)}</select></span></div>
     </header>
 
     <main className="transfer-main">
@@ -363,20 +387,30 @@ export default function App() {
             <form onSubmit={event => { event.preventDefault(); void prepare() }}>
               {sourceStatus}
               {sponsorStatus}
-              <div className="field"><label htmlFor="asset-select">Asset</label><div className="select-wrap"><span className="token-symbol" aria-hidden="true">◇</span><select id="asset-select" value={assetChoice} disabled={controlsBusy} onChange={event => { const next = event.target.value as 'native' | 'wrapped' | 'custom'; if (next !== assetChoice) edit(() => { setAssetChoice(next); setCustomAddress(''); setAmount(''); setTokenTouched(false) }) }}><option value="native">{nativeCurrency.symbol} · Native</option><option value="wrapped">{`W${nativeCurrency.symbol} · Wrapped ${nativeCurrency.symbol}`}</option><option value="custom">Another ERC-20 token</option></select></div></div>
+              <div className="field">
+                <div className="amount-input">
+                  <label htmlFor="amount">Amount</label>
+                  <div className="amount-row">
+                    <input id="amount" inputMode="decimal" aria-invalid={Boolean(amountError)} aria-describedby={amountError ? 'amount-error' : undefined} placeholder="0.00" autoComplete="off" value={amount} disabled={controlsBusy} onChange={event => edit(() => setAmount(event.target.value.replace(',', '.')))} required />
+                    <label htmlFor="asset-select" className="sr-only">Asset</label>
+                    <span className="select-wrap asset-select">{assetChoice === 'custom' ? <span className="select-logo token-placeholder" aria-hidden="true" /> : <img className="select-logo" src={nativeLogos[nativeCurrency.symbol]} alt="" />}<select id="asset-select" value={assetChoice} disabled={controlsBusy} onChange={event => { const next = event.target.value as 'native' | 'wrapped' | 'custom'; if (next !== assetChoice) edit(() => { setAssetChoice(next); setCustomAddress(''); setAmount(''); setTokenTouched(false) }) }}><option value="native" style={logoStyle(nativeLogos[nativeCurrency.symbol])}>{nativeCurrency.symbol}</option><option value="wrapped" style={logoStyle(nativeLogos[nativeCurrency.symbol])}>{`W${nativeCurrency.symbol}`}</option><option value="custom" className="custom-token">{assetChoice === 'custom' && assetSymbol ? assetSymbol : 'Custom'}</option></select></span>
+                  </div>
+                  <div className="balance-row"><span className="balance">{assetLoading ? 'Loading balance…' : assetInfo ? `Available: ${formatUnits(assetInfo.balance, assetInfo.decimals)} ${assetInfo.symbol}` : wallet.address ? '' : 'Connect a wallet to see your balance'}</span><button type="button" className="max-button" disabled={!assetInfo || assetLoading || assetInfo.balance === 0n || controlsBusy} onClick={() => edit(() => { if (assetInfo) setAmount(formatUnits(assetInfo.balance, assetInfo.decimals)) })}>Max</button></div>
+                </div>
+              </div>
               {assetChoice === 'custom' ? <div className="field"><label htmlFor="token-address">Contract address</label><input id="token-address" className="mono" onBlur={() => setTokenTouched(true)} aria-invalid={Boolean(tokenError)} aria-describedby={tokenError ? 'token-error' : undefined} placeholder="0x…" value={customAddress} disabled={controlsBusy} onChange={event => { const next = event.target.value.trim(); if (next !== customAddress) edit(() => { setCustomAddress(next); setAmount(''); setTokenTouched(false) }) }} autoComplete="off" spellCheck={false} required /></div> : null}
               {tokenError ? <p id="token-error" className="notice error" role="alert">{tokenError}</p> : null}
-              <div className="field"><div className="label-row"><label htmlFor="amount">Amount</label><span className="balance">{assetLoading ? 'Loading balance…' : assetInfo ? `Available: ${formatUnits(assetInfo.balance, assetInfo.decimals)} ${assetInfo.symbol}` : '—'}</span></div><div className="amount-input"><input id="amount" inputMode="decimal" aria-invalid={Boolean(amountError)} aria-describedby={amountError ? 'amount-error' : undefined} placeholder="0.00" autoComplete="off" value={amount} disabled={controlsBusy} onChange={event => edit(() => setAmount(event.target.value.replace(',', '.')))} required /><span className="amount-unit">{assetSymbol}</span><button type="button" className="max-button" disabled={!assetInfo || assetLoading || assetInfo.balance === 0n || controlsBusy} onClick={() => edit(() => { if (assetInfo) setAmount(formatUnits(assetInfo.balance, assetInfo.decimals)) })}>Max</button></div></div>
               {amountError ? <p id="amount-error" className="notice error" role="alert">{amountError}</p> : null}
               {sourceReady && assetInfo && assetInfo.reservedBalance > 0n ? <p className="field-note reserve-note">{formatUnits(assetInfo.reservedBalance, assetInfo.decimals)} {assetInfo.symbol} is reserved by Monad and cannot be transferred.</p> : null}
               <div className="field recipient-field">
-                <label htmlFor="recipient-select">Recipient</label>
-                <div className="select-wrap recipient-select"><select id="recipient-select" value={recipientChoice} disabled={controlsBusy} onChange={event => edit(() => { setRecipientChoice(event.target.value as 'custom' | 'sponsor'); setRecipientTouched(false) })}><option value="sponsor" disabled={!sponsorWallet.address}>Sponsor wallet</option><option value="custom">Another wallet</option></select></div>
+                <div className="label-row"><label htmlFor="recipient-select">Recipient</label>
+                <span className="select-wrap recipient-select"><select id="recipient-select" value={recipientChoice} disabled={controlsBusy} onChange={event => edit(() => { setRecipientChoice(event.target.value as 'custom' | 'sponsor'); setRecipientTouched(false) })}><option value="sponsor" disabled={!sponsorWallet.address}>Sponsor wallet</option><option value="custom">Another wallet</option></select></span></div>
                 {recipientChoice === 'sponsor' ? <output className="recipient-address mono" aria-label="Recipient address">{recipient || 'Connect a sponsor wallet.'}</output> : <><label htmlFor="recipient" className="sr-only">Recipient address</label><input id="recipient" className="mono" onBlur={() => setRecipientTouched(true)} aria-invalid={Boolean(recipientError)} aria-describedby={recipientError ? 'recipient-error' : undefined} placeholder="0x…" autoComplete="off" spellCheck={false} value={customRecipient} disabled={controlsBusy} onChange={event => edit(() => setCustomRecipient(event.target.value.trim()))} required /></>}
               </div>
               {recipientError ? <p id="recipient-error" className="notice error" role="alert">{recipientError}</p> : null}
               {assetError ? <div className="notice error" role="alert"><span>{assetError}</span><button type="button" className="text-button" disabled={controlsBusy || assetLoading} onClick={() => void assetCheck.refetch()}>Retry balance</button></div> : null}
               <Button type="submit" className="primary full" disabled={controlsBusy || !sourceReady || assetLoading || !wallet.address || !assetInfo || !amount || !isAddress(recipient) || Boolean(amountError || recipientError || tokenError)} busy={Boolean(busy)}>{busy || 'Review transfer'}{!busy ? <Icon name="arrow" size={18} /> : null}</Button>
+              {!busy && reviewHint ? <p className="cta-hint">{reviewHint}</p> : null}
             </form>
           </> : null}
 

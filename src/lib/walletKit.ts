@@ -6,6 +6,7 @@ import { NETWORKS, getPublicClient } from './chain'
 import { WalletSessions, cleanWalletName, type WalletRole } from './walletSessions'
 import { injectedTransport, type SelectWalletAccount } from './walletInjected'
 import { approveConnection, captureWalletLink, clearWalletLink, walletConnectTransport } from './walletSessionsWc'
+import { currentTheme, subscribeTheme } from './theme'
 
 const projectId = import.meta.env.VITE_REOWN_PROJECT_ID?.trim() ?? ''
 export const walletConfigurationError = /^[a-f\d]{32}$/i.test(projectId) ? null
@@ -25,9 +26,11 @@ let selecting = false
 const client = () => clientPromise ??= SignClient.init({ projectId, metadata })
 const getModal = () => modal ??= createAppKit({
   projectId, networks, metadata, manualWCControl: true, enableReconnect: false,
-  themeMode: 'light', enableWalletGuide: false,
+  themeMode: currentTheme(), enableWalletGuide: false,
   features: { analytics: false, email: false, socials: [], swaps: false, onramp: false, send: false, receive: false, history: false },
 })
+
+subscribeTheme(() => modal?.setThemeMode(currentTheme()))
 
 export const watchWallets = (listener: () => void) => watchConnectors(walletConfig, { onChange: listener })
 export function getAvailableWallets() {

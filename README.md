@@ -69,3 +69,7 @@ Fork tests require Anvil and use disposable accounts on `127.0.0.1:18545`; no tr
 Serve `dist/` over HTTPS. Vercel configuration and a `_headers` file for compatible static hosts are included. Set the public `VITE_REOWN_PROJECT_ID` at build time and allowlist the deployed origin in Reown. Apply the supplied security headers and publish only `dist/`.
 
 Dependency overrides apply security fixes to transitive packages.
+
+## License
+
+[MIT](LICENSE) © 2026 slkzgm.

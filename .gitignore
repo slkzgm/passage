@@ -1,0 +1,15 @@
+.env
+.env.*
+!config/public/.env.example
+node_modules/
+dist/
+test-results/
+playwright-report/
+.vite/
+*.log
+.playwright-mcp/
+coverage/
+.vercel/
+.DS_Store
+*.pem
+*.key

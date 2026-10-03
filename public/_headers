@@ -1,0 +1,7 @@
+/*
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data: https://fonts.reown.com; connect-src 'self' https://ethereum-rpc.publicnode.com https://mainnet.base.org https://base-rpc.publicnode.com https://bsc-dataseed.binance.org https://rpc.monad.xyz https://rpc1.monad.xyz https://rpc.mainnet.chain.robinhood.com https://*.reown.com https://*.walletconnect.com https://*.walletconnect.org https://*.web3modal.org https://*.metamask.io https://*.coinbase.com wss://*.walletconnect.com wss://*.walletconnect.org wss://*.reown.com; frame-src https://*.reown.com https://*.walletconnect.com https://*.walletconnect.org https://*.web3modal.org https://*.metamask.io https://*.coinbase.com https://*.walletlink.org; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'
+  Referrer-Policy: no-referrer
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()
+  Strict-Transport-Security: max-age=31536000; includeSubDomains

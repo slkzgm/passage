@@ -19,6 +19,7 @@ let walletChainId = DEFAULT_CHAIN_ID
 let payingChainId = DEFAULT_CHAIN_ID
 let providerRequests: { provider: 'source' | 'paying'; role: 'source' | 'sponsor'; method: string }[] = []
 let networkSwitches: number[] = []
+let pendingSwitch: { started: ReturnType<typeof barrier>; respond: ReturnType<typeof barrier> } | undefined
 let signingChains: number[] = []
 let sendingChains: number[] = []
 
@@ -40,6 +41,7 @@ test.beforeEach(async ({ page }) => {
   payingChainId = DEFAULT_CHAIN_ID
   providerRequests = []
   networkSwitches = []
+  pendingSwitch = undefined
   signingChains = []
   sendingChains = []
   await page.route('https://**/*', async route => {
@@ -67,12 +69,18 @@ test.beforeEach(async ({ page }) => {
     const account = role === 'source' ? source : sponsor
     if (method === 'eth_accounts' || method === 'eth_requestAccounts') return [account.address]
     if (method === 'eth_chainId') return toHex(currentChainId)
-    if (method === 'passage_setChain') { walletChainId = (params as number[])[0]; return null }
+    if (method === 'passage_setChain') {
+      if (provider === 'paying') payingChainId = (params as number[])[0]
+      else walletChainId = (params as number[])[0]
+      return null
+    }
     if (method === 'wallet_getPermissions' || method === 'wallet_requestPermissions') return [{ parentCapability: 'eth_accounts' }]
     if (method === 'wallet_getCapabilities') return {}
     if (method === 'wallet_revokePermissions') return null
     if (method === 'wallet_switchEthereumChain') {
       const nextChainId = Number((params as { chainId: string }[])[0].chainId)
+      const held = pendingSwitch
+      if (held) { pendingSwitch = undefined; held.started.release(); await held.respond.promise }
       if (provider === 'paying') payingChainId = nextChainId
       else walletChainId = nextChainId
       networkSwitches.push(nextChainId)
@@ -107,8 +115,8 @@ test.beforeEach(async ({ page }) => {
   await page.addInitScript(({ sponsorAddress }) => {
     const win = window as typeof window & {
       passageTestRequest: (method: string, params: unknown, role: string, provider?: string) => Promise<unknown>
-      passageSelectSponsor: () => void
-      passageSetChain: (chainId: number) => Promise<void>
+      passageMutateSourceAccount: () => void
+      passageSetChain: (chainId: number, provider?: 'source' | 'paying') => Promise<void>
       ethereum: unknown
     }
     let role = 'source'
@@ -132,11 +140,11 @@ test.beforeEach(async ({ page }) => {
     const sourceWallet = createProvider('source', () => role)
     const payingWallet = createProvider('paying', () => 'sponsor')
     win.ethereum = sourceWallet.provider
-    win.passageSetChain = async chainId => {
-      await win.passageTestRequest('passage_setChain', [chainId], role, 'source')
-      for (const fn of sourceWallet.listeners.get('chainChanged') ?? []) fn(`0x${chainId.toString(16)}`)
+    // Silent drift exercises action-time chain checks independently of event handling.
+    win.passageSetChain = async (chainId, provider = 'source') => {
+      await win.passageTestRequest('passage_setChain', [chainId], provider === 'paying' ? 'sponsor' : role, provider)
     }
-    win.passageSelectSponsor = () => { role = 'sponsor'; for (const fn of sourceWallet.listeners.get('accountsChanged') ?? []) fn([sponsorAddress]) }
+    win.passageMutateSourceAccount = () => { role = 'sponsor'; for (const fn of sourceWallet.listeners.get('accountsChanged') ?? []) fn([sponsorAddress]) }
     const announce = () => {
       for (const detail of [
         { info: { uuid: 'cce3612e-ab43-47ed-9b16-1e1b8034f036', name: 'Passage Test Wallet', rdns: 'test.passage.wallet' }, provider: sourceWallet.provider },
@@ -170,8 +178,17 @@ function barrier() {
 
 async function connectSource(page: Page) {
   await page.goto('/')
-  await page.getByRole('button', { name: 'Connect wallet', exact: true }).click()
-  await page.getByText('Passage Test Wallet', { exact: true }).click()
+  await page.getByRole('button', { name: 'Connect Fomo wallet', exact: true }).click()
+  await page.getByRole('dialog').getByRole('button', { name: 'Passage Test Wallet', exact: true }).click()
+  await expect(page.getByRole('dialog')).toBeHidden()
+  await expect(page.getByRole('button', { name: 'Disconnect Fomo wallet', exact: true })).toBeVisible()
+}
+
+async function connectSponsor(page: Page) {
+  await page.getByRole('button', { name: 'Connect sponsor wallet', exact: true }).click()
+  await page.getByRole('dialog').getByRole('button', { name: 'Passage Paying Wallet', exact: true }).click()
+  await expect(page.getByRole('dialog')).toBeHidden()
+  await expect(page.getByRole('button', { name: 'Disconnect sponsor wallet', exact: true })).toBeVisible()
 }
 
 async function fillValidTransfer(page: Page) {
@@ -197,12 +214,12 @@ function expectNoWalletAction() {
   expect(sends).toBe(0)
 }
 
-for (const lostResponse of [false, true]) test(`Reown connection → sign → sponsor → ${lostResponse ? 'recover lost response' : 'confirm'} on fork`, async ({ page }) => {
+for (const lostResponse of [false, true]) test(`Independent connections → sign → sponsor → ${lostResponse ? 'recover lost response' : 'confirm'} on fork`, async ({ page }) => {
   loseSendResponse = lostResponse
   const before = await client.readContract({ address: WETH, abi: erc20Abi, functionName: 'balanceOf', args: [recipient] })
   await page.goto('/')
-  await page.getByRole('button', { name: 'Connect wallet', exact: true }).click()
-  await page.getByText('Passage Test Wallet', { exact: true }).click()
+  await page.getByRole('button', { name: 'Connect Fomo wallet', exact: true }).click()
+  await page.getByRole('dialog').getByRole('button', { name: 'Passage Test Wallet', exact: true }).click()
   await expect(page.getByText(/Available: 0\.0\d+ WETH/)).toBeVisible()
   await expect(page.getByLabel('Asset', { exact: true })).toHaveValue('wrapped')
   await page.getByLabel('Amount', { exact: true }).fill('0.002')
@@ -216,8 +233,7 @@ for (const lostResponse of [false, true]) test(`Reown connection → sign → sp
   await page.getByRole('button', { name: 'Copy payment link', exact: true }).click()
   const link = await page.getByLabel('Payment link').inputValue()
   expect(link).toContain('#transfer=')
-  // Real adapter event handling, replacing the user's account selection in the extension.
-  await page.evaluate(() => (window as unknown as { passageSelectSponsor: () => void }).passageSelectSponsor())
+  await connectSponsor(page)
   await page.getByRole('button', { name: 'Estimate fees', exact: true }).click()
   await expect(page.getByText('Fee budget')).toBeVisible({ timeout: 30_000 })
   await page.getByRole('button', { name: 'Pay fees and send', exact: true }).click()
@@ -239,8 +255,8 @@ test('native transfer to the paying account switches network before signing and 
   walletChainId = 1
   await node.setBalance({ address: source.address, value: parseEther('0.02') })
   await page.goto('/')
-  await page.getByRole('button', { name: 'Connect wallet', exact: true }).click()
-  await page.getByText('Passage Test Wallet', { exact: true }).click()
+  await page.getByRole('button', { name: 'Connect Fomo wallet', exact: true }).click()
+  await page.getByRole('dialog').getByRole('button', { name: 'Passage Test Wallet', exact: true }).click()
   await page.getByLabel('Asset', { exact: true }).selectOption('native')
   await expect(page.getByText('Available: 0.02 ETH', { exact: true })).toBeVisible()
   await page.getByLabel('Amount', { exact: true }).fill('0.002')
@@ -256,11 +272,11 @@ test('native transfer to the paying account switches network before signing and 
   await expect(page.getByRole('heading', { name: 'Pay network fees', exact: true })).toBeVisible({ timeout: 30_000 })
   expect(networkSwitches.slice(switchesBeforeSign)).toEqual([DEFAULT_CHAIN_ID])
   expect(signingChains).toEqual([DEFAULT_CHAIN_ID])
-  await page.evaluate(() => (window as unknown as { passageSelectSponsor: () => void }).passageSelectSponsor())
+  await connectSponsor(page)
   await page.getByRole('button', { name: 'Estimate fees', exact: true }).click()
   await expect(page.getByText('Fee budget', { exact: true })).toBeVisible({ timeout: 30_000 })
-  await page.evaluate(() => (window as unknown as { passageSetChain: (chainId: number) => Promise<void> }).passageSetChain(8453))
-  expect(walletChainId).toBe(8453)
+  await page.evaluate(() => (window as unknown as { passageSetChain: (chainId: number, provider: string) => Promise<void> }).passageSetChain(8453, 'paying'))
+  expect(payingChainId).toBe(8453)
   const switchesBeforeSend = networkSwitches.length
   const sponsorBefore = await client.getBalance({ address: sponsor.address })
   await page.getByRole('button', { name: 'Pay fees and send', exact: true }).click()
@@ -274,7 +290,7 @@ test('native transfer to the paying account switches network before signing and 
   expect(await client.getBalance({ address: sponsor.address })).toBe(sponsorBefore + parseEther('0.002') - receipt.gasUsed * receipt.effectiveGasPrice)
 })
 
-test('network and asset choices read their own balances without switching the wallet', async ({ page }) => {
+test('network and asset choices refresh balances and synchronize the connected Fomo wallet', async ({ page }) => {
   walletChainId = 1
   const nativeBalances = new Map(NETWORKS.map((item, index) => [item.id, parseEther(item.chain.nativeCurrency.symbol === 'MON' ? '20' : String(index + 2))]))
   const publicReads: { chainId: number; method: string }[] = []
@@ -299,9 +315,10 @@ test('network and asset choices read their own balances without switching the wa
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ jsonrpc: '2.0', id: payload.id, ...(result === undefined ? { error: { code: -32601, message: `Unmocked method: ${payload.method}` } } : { result }) }) })
   })
   await page.goto('/')
-  await page.getByRole('button', { name: 'Connect wallet', exact: true }).click()
-  await page.getByText('Passage Test Wallet', { exact: true }).click()
+  await page.getByRole('button', { name: 'Connect Fomo wallet', exact: true }).click()
+  await page.getByRole('dialog').getByRole('button', { name: 'Passage Test Wallet', exact: true }).click()
   await expect(page.getByText('Available: 1.5 WETH', { exact: true })).toBeVisible()
+  await expect.poll(() => walletChainId).toBe(DEFAULT_CHAIN_ID)
   const switchesBeforeSelection = networkSwitches.length
   const networkSelect = page.getByLabel('Network', { exact: true })
   const assetSelect = page.getByLabel('Asset', { exact: true })
@@ -313,6 +330,7 @@ test('network and asset choices read their own balances without switching the wa
   await expect(page.getByText('Available: 1.5 WETH', { exact: true })).toBeVisible()
   for (const [index, selected] of NETWORKS.entries()) {
     await networkSelect.selectOption(String(selected.id))
+    await expect.poll(() => walletChainId).toBe(selected.id)
     await expect(assetSelect).toHaveValue('wrapped')
     await expect(page.getByText(`Available: 1.5 W${selected.chain.nativeCurrency.symbol}`, { exact: true })).toBeVisible()
     await assetSelect.selectOption('native')
@@ -334,7 +352,8 @@ test('network and asset choices read their own balances without switching the wa
     expect(publicReads.some(read => read.chainId === selected.id && read.method === 'eth_getBalance')).toBe(true)
     expect(publicReads.some(read => read.chainId === selected.id && read.method === 'eth_call')).toBe(true)
   }
-  expect(networkSwitches.length).toBe(switchesBeforeSelection)
+  await expect.poll(() => walletChainId).toBe(DEFAULT_CHAIN_ID)
+  expect(networkSwitches.slice(switchesBeforeSelection)).toEqual([...NETWORKS.slice(1).map(item => item.id), DEFAULT_CHAIN_ID])
   expect(signingChains).toEqual([])
   expect(sends).toBe(0)
 })
@@ -410,7 +429,7 @@ for (const change of ['account', 'network'] as const) test(`a delayed old source
     await fillValidTransfer(page)
     await expect(page.getByText('Checking sending account…', { exact: true })).toBeVisible()
     if (change === 'account') {
-      await page.evaluate(() => (window as unknown as { passageSelectSponsor: () => void }).passageSelectSponsor())
+      await page.evaluate(() => (window as unknown as { passageMutateSourceAccount: () => void }).passageMutateSourceAccount())
       await expect(page.getByText('Available: 1.5 WETH', { exact: true })).toBeVisible()
     } else {
       await page.getByLabel('Network', { exact: true }).selectOption('8453')
@@ -429,7 +448,9 @@ for (const change of ['account', 'network'] as const) test(`a delayed old source
     await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
     await expect(page.getByRole('alert')).toContainText('This account has no delegation')
     await expect(page.getByRole('button', { name: 'Review transfer', exact: true })).toBeDisabled()
-    expectNoWalletAction()
+    expect(networkSwitches).toEqual(change === 'network' ? [8453] : [])
+    expect(signingChains).toEqual([])
+    expect(sends).toBe(0)
   } finally { respond.release() }
 })
 
@@ -484,7 +505,7 @@ for (const unsuitable of ['contract', 'unfunded'] as const) test(`a ${unsuitable
   await page.getByRole('checkbox').check()
   await page.getByRole('button', { name: 'Sign transfer', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'Pay network fees', exact: true })).toBeVisible({ timeout: 30_000 })
-  await page.evaluate(() => (window as unknown as { passageSelectSponsor: () => void }).passageSelectSponsor())
+  await connectSponsor(page)
   await expect(page.getByRole('alert')).toContainText(unsuitable === 'contract' ? 'This contract wallet cannot pay fees directly.' : 'This wallet has no ETH balance')
   await expect(page.getByRole('button', { name: 'Estimate fees', exact: true })).toBeDisabled()
   await expect(page.getByRole('button', { name: 'Pay fees and send', exact: true })).toHaveCount(0)
@@ -554,7 +575,7 @@ test('a fee budget expires automatically without submitting a transaction', asyn
   await page.getByRole('checkbox').check()
   await page.getByRole('button', { name: 'Sign transfer', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'Pay network fees', exact: true })).toBeVisible({ timeout: 30_000 })
-  await page.evaluate(() => (window as unknown as { passageSelectSponsor: () => void }).passageSelectSponsor())
+  await connectSponsor(page)
   await page.getByRole('button', { name: 'Estimate fees', exact: true }).click()
   await expect(page.getByText('Fee budget', { exact: true })).toBeVisible({ timeout: 30_000 })
   await page.clock.fastForward(60_001)
@@ -565,15 +586,17 @@ test('a fee budget expires automatically without submitting a transaction', asyn
   expect(sends).toBe(0)
 })
 
-test('mobile paying-wallet picker connects a separate provider and completes the transfer', async ({ page }) => {
+test('mobile independent wallet roles use the source signer and sponsor broadcaster', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
   const before = await client.readContract({ address: WETH, abi: erc20Abi, functionName: 'balanceOf', args: [recipient] })
   const paymentLink = await signWithSource(page)
   const summary = await page.locator('.transfer-summary').innerText()
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
-  await page.getByRole('button', { name: 'Select paying wallet', exact: true }).click()
-  await page.getByText('Passage Paying Wallet', { exact: true }).click()
-  await expect(page.getByRole('button', { name: 'Change paying wallet', exact: true })).toBeVisible()
+  await connectSponsor(page)
+  await expect(page.getByRole('button', { name: 'Change sponsor wallet', exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Disconnect Fomo wallet', exact: true })).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Fomo wallet', exact: true }).getByText('Passage Test Wallet', { exact: true })).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Sponsor wallet', exact: true }).getByText('Passage Paying Wallet', { exact: true })).toBeVisible()
   await expect(page.getByLabel('Payment link', { exact: true })).toHaveValue(paymentLink)
   await expect(page.locator('.transfer-summary')).toHaveText(summary, { useInnerText: true })
   await page.getByRole('button', { name: 'Estimate fees', exact: true }).click()
@@ -587,39 +610,108 @@ test('mobile paying-wallet picker connects a separate provider and completes the
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
 })
 
-test('paying-wallet picker cancellation, source reselection and payer changes preserve the authorization', async ({ page }) => {
+test('wallet picker cancellation and rejected replacement preserve both roles and the fee budget', async ({ page }) => {
   const paymentLink = await signWithSource(page)
   const summary = await page.locator('.transfer-summary').innerText()
-  const selectPayer = page.getByRole('button', { name: 'Select paying wallet', exact: true })
-  await selectPayer.click()
-  await expect(page.getByText('Passage Paying Wallet', { exact: true })).toBeVisible()
-  await page.getByTestId('w3m-header-close').click()
-  await expect(page.getByText('Passage Paying Wallet', { exact: true })).toBeHidden()
-  await expect(page.getByRole('heading', { name: 'Pay network fees', exact: true })).toBeVisible()
+  const fomo = page.getByRole('region', { name: 'Fomo wallet', exact: true })
+  const paying = page.getByRole('region', { name: 'Sponsor wallet', exact: true })
+  const selectSponsor = page.getByRole('button', { name: 'Connect sponsor wallet', exact: true })
+  await selectSponsor.click()
+  await expect(page.getByRole('dialog', { name: 'Connect sponsor wallet', exact: true })).toBeVisible()
+  await expect(page.getByRole('dialog').getByRole('button', { name: 'WalletConnect', exact: true })).toBeVisible()
+  await expect(page.getByText('Mobile wallets and QR code', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Close wallet selection', exact: true }).click()
+  await expect(selectSponsor).toBeVisible()
+  await expect(fomo.getByText('Passage Test Wallet', { exact: true })).toBeVisible()
   await expect(page.getByLabel('Payment link', { exact: true })).toHaveValue(paymentLink)
   await expect(page.locator('.transfer-summary')).toHaveText(summary, { useInnerText: true })
   await expect(page.getByRole('button', { name: 'Estimate fees', exact: true })).toBeDisabled()
-  await selectPayer.click()
-  await page.getByText('Passage Test Wallet', { exact: true }).click()
-  await expect(page.getByText('This is the sending account. Choose a different account in your wallet, then reconnect.', { exact: true })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Estimate fees', exact: true })).toBeDisabled()
-  await expect(page.getByLabel('Payment link', { exact: true })).toHaveValue(paymentLink)
-  await selectPayer.click()
-  await page.getByText('Passage Paying Wallet', { exact: true }).click()
+  await selectSponsor.click()
+  await page.getByRole('dialog').getByRole('button', { name: 'Passage Test Wallet', exact: true }).click()
+  await expect(paying.getByRole('alert')).toContainText('Choose a different account and wallet connection for each role.')
+  await expect(selectSponsor).toBeVisible()
+  await expect(fomo.getByText('Passage Test Wallet', { exact: true })).toBeVisible()
+  await connectSponsor(page)
   await page.getByRole('button', { name: 'Estimate fees', exact: true }).click()
   await expect(page.getByText('Fee budget', { exact: true })).toBeVisible({ timeout: 30_000 })
-  await page.getByRole('button', { name: 'Change paying wallet', exact: true }).click()
-  await expect(page.getByText('Passage Paying Wallet', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Change sponsor wallet', exact: true }).click()
+  await expect(page.getByRole('dialog', { name: 'Change sponsor wallet', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Close wallet selection', exact: true }).click()
+  await expect(page.getByText('Fee budget', { exact: true })).toBeVisible()
+  await expect(fomo.getByText('Passage Test Wallet', { exact: true })).toBeVisible()
+  await expect(paying.getByText('Passage Paying Wallet', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Change sponsor wallet', exact: true }).click()
+  await page.getByRole('dialog').getByRole('button', { name: 'Passage Test Wallet', exact: true }).click()
+  await expect(paying.getByRole('alert')).toContainText('Choose a different account and wallet connection for each role.')
+  await expect(paying.getByText('Passage Paying Wallet', { exact: true })).toBeVisible()
+  await expect(page.getByText('Fee budget', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Disconnect sponsor wallet', exact: true }).click()
+  await expect(selectSponsor).toBeVisible()
+  await expect(fomo.getByText('Passage Test Wallet', { exact: true })).toBeVisible()
   await expect(page.getByText('Fee budget', { exact: true })).toHaveCount(0)
-  await page.getByTestId('w3m-header-close').click()
-  await expect(page.getByLabel('Payment link', { exact: true })).toHaveValue(paymentLink)
-  await expect(page.locator('.transfer-summary')).toHaveText(summary, { useInnerText: true })
-  await selectPayer.click()
-  await page.getByText('Passage Paying Wallet', { exact: true }).click()
+  await connectSponsor(page)
   await expect(page.getByRole('button', { name: 'Estimate fees', exact: true })).toBeEnabled()
   await expect(page.getByRole('button', { name: 'Pay fees and send', exact: true })).toHaveCount(0)
+  await expect(page.getByLabel('Payment link', { exact: true })).toHaveValue(paymentLink)
+  await expect(page.locator('.transfer-summary')).toHaveText(summary, { useInnerText: true })
   expect(providerRequests.filter(request => request.method === 'eth_signTypedData_v4')).toEqual([{ provider: 'source', role: 'source', method: 'eth_signTypedData_v4' }])
-  expect(providerRequests.filter(request => request.method === 'eth_sendTransaction')).toEqual([])
+  expect(sends).toBe(0)
+})
+
+test('both wallet roles synchronize sequentially and disconnect independently', async ({ page }) => {
+  await connectSource(page)
+  await connectSponsor(page)
+  const fomo = page.getByRole('region', { name: 'Fomo wallet', exact: true })
+  const paying = page.getByRole('region', { name: 'Sponsor wallet', exact: true })
+  await expect(fomo.getByText('Passage Test Wallet', { exact: true })).toBeVisible()
+  await expect(paying.getByText('Passage Paying Wallet', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Change Fomo wallet', exact: true }).click()
+  await expect(page.getByRole('dialog', { name: 'Change Fomo wallet', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Close wallet selection', exact: true }).click()
+  const started = barrier()
+  const respond = barrier()
+  const switches = () => providerRequests.filter(request => request.method === 'wallet_switchEthereumChain')
+  const beforeSwitch = switches().length
+  pendingSwitch = { started, respond }
+  try {
+    await page.getByLabel('Network', { exact: true }).selectOption('8453')
+    await started.promise
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
+    expect(switches().slice(beforeSwitch)).toHaveLength(1)
+    respond.release()
+    await expect.poll(() => [walletChainId, payingChainId]).toEqual([8453, 8453])
+    expect(switches().slice(beforeSwitch).map(request => request.provider).sort()).toEqual(['paying', 'source'])
+  } finally { respond.release() }
+  await page.getByRole('button', { name: 'Disconnect Fomo wallet', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Connect Fomo wallet', exact: true })).toBeVisible()
+  await expect(paying.getByText('Passage Paying Wallet', { exact: true })).toBeVisible()
+  await page.getByLabel('Network', { exact: true }).selectOption('1')
+  await expect.poll(() => payingChainId).toBe(1)
+  expect(walletChainId).toBe(8453)
+  await page.getByRole('button', { name: 'Connect Fomo wallet', exact: true }).click()
+  await page.getByRole('dialog').getByRole('button', { name: 'Passage Test Wallet', exact: true }).click()
+  await expect.poll(() => [walletChainId, payingChainId]).toEqual([1, 1])
+  await page.getByRole('button', { name: 'Disconnect sponsor wallet', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Connect sponsor wallet', exact: true })).toBeVisible()
+  await expect(fomo.getByText('Passage Test Wallet', { exact: true })).toBeVisible()
+  await page.getByLabel('Network', { exact: true }).selectOption(String(DEFAULT_CHAIN_ID))
+  await expect.poll(() => walletChainId).toBe(DEFAULT_CHAIN_ID)
+  expect(payingChainId).toBe(1)
+  expect(signingChains).toEqual([])
+  expect(sends).toBe(0)
+})
+
+test('changing the Fomo account never assigns the sponsor role or changes the signed transfer', async ({ page }) => {
+  const paymentLink = await signWithSource(page)
+  const summary = await page.locator('.transfer-summary').innerText()
+  await page.evaluate(() => (window as unknown as { passageMutateSourceAccount: () => void }).passageMutateSourceAccount())
+  await expect(page.getByRole('region', { name: 'Fomo wallet', exact: true }).getByTitle(sponsor.address)).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Connect sponsor wallet', exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Disconnect sponsor wallet', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Estimate fees', exact: true })).toBeDisabled()
+  await expect(page.getByLabel('Payment link', { exact: true })).toHaveValue(paymentLink)
+  await expect(page.locator('.transfer-summary')).toHaveText(summary, { useInnerText: true })
+  expect(providerRequests.filter(request => request.provider === 'paying' && ['eth_requestAccounts', 'eth_sendTransaction'].includes(request.method))).toEqual([])
   expect(sends).toBe(0)
 })
 

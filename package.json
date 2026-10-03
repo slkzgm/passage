@@ -24,14 +24,12 @@
   "type": "module",
   "dependencies": {
     "@reown/appkit": "^1.8.24",
-    "@reown/appkit-adapter-wagmi": "^1.8.24",
     "@tanstack/react-query": "^5.104.0",
-    "@wagmi/connectors": "6.2.0",
     "@wagmi/core": "2.22.1",
+    "@walletconnect/sign-client": "2.23.7",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
-    "viem": "^2.57.2",
-    "wagmi": "^2.19.5"
+    "viem": "^2.57.2"
   },
   "devDependencies": {
     "@playwright/test": "^1.63.0",

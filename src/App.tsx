@@ -47,6 +47,25 @@ function Button({ children, busy, ...props }: ButtonHTMLAttributes<HTMLButtonEle
   return <button {...props} aria-busy={busy || undefined}>{busy ? <span className="spinner" aria-hidden="true" /> : null}{children}</button>
 }
 
+function WalletCard({ label, wallet, chainId, disabled, onChoose, onDisconnect, onSync }: {
+  label: 'Fomo wallet' | 'Sponsor wallet'
+  wallet: ReturnType<typeof useWallet>
+  chainId: number
+  disabled: boolean
+  onChoose: () => void
+  onDisconnect: () => void
+  onSync: () => void
+}) {
+  const actionLabel = label === 'Fomo wallet' ? label : 'sponsor wallet'
+  const wrongChain = Boolean(wallet.address && wallet.chainId !== chainId)
+  return <section className="wallet-role" aria-label={label}>
+    <div className="wallet-role-heading"><span className="field-label">{label}</span>{wallet.address ? <div className="wallet-role-actions"><button type="button" aria-label={`Change ${actionLabel}`} disabled={disabled || wallet.syncing} onClick={onChoose}>Change</button><button type="button" aria-label={`Disconnect ${actionLabel}`} disabled={disabled || wallet.syncing} onClick={onDisconnect}>Disconnect</button></div> : null}</div>
+    {wallet.address ? <div className="wallet-identity"><span className="source-icon"><Icon name="wallet" size={17} /></span><span><strong className="mono" title={wallet.address}>{shortAddress(wallet.address)}</strong><small>{wallet.walletName}</small></span><span className={`wallet-network-state${wrongChain ? ' needs-sync' : ''}`} role="status">{wallet.syncing ? <><span className="spinner" />Switching…</> : wrongChain ? 'Switch needed' : <Icon name="check" size={15} />}</span></div> : <button type="button" className="source-wallet" disabled={disabled || wallet.syncing} onClick={onChoose}><span className="source-icon"><Icon name="wallet" size={17} /></span><span><strong>Connect {actionLabel}</strong></span><Icon name="arrow" size={18} /></button>}
+    {wallet.error ? <p className="notice error" role="alert">{wallet.error}</p> : null}
+    {wrongChain && !wallet.syncing ? <button type="button" className="text-button sync-network" aria-label={`Sync ${actionLabel} network`} disabled={disabled} onClick={onSync}>Switch to {getNetwork(chainId).name}</button> : null}
+  </section>
+}
+
 const accountCheckOptions = {
   retry: false,
   gcTime: 0,
@@ -63,10 +82,15 @@ function AccountStatus({ checking, paused, error, label, retry, disabled }: { ch
 }
 
 export default function App() {
-  const wallet = useWallet()
+  const [selectedChainId, setSelectedChainId] = useState(DEFAULT_CHAIN_ID)
+  const wallet = useWallet('source', selectedChainId)
+  const sponsorWallet = useWallet('sponsor', selectedChainId)
   const walletRef = useRef(wallet)
   walletRef.current = wallet
-  const [selectedChainId, setSelectedChainId] = useState(DEFAULT_CHAIN_ID)
+  const sponsorRef = useRef(sponsorWallet)
+  sponsorRef.current = sponsorWallet
+  const [choosingWallet, setChoosingWallet] = useState<'source' | 'sponsor' | null>(null)
+  const walletDialog = useRef<HTMLDialogElement>(null)
   const [assetChoice, setAssetChoice] = useState<'native' | 'wrapped' | 'custom'>('wrapped')
   const [customAddress, setCustomAddress] = useState('')
   const [tokenTouched, setTokenTouched] = useState(false)
@@ -75,9 +99,8 @@ export default function App() {
   const [recipient, setRecipient] = useState('')
   const [prepared, setPrepared] = useState<PreparedTransfer>()
   const [signed, setSigned] = useState<SignedTransfer>()
-  const [payerSelectionStarted, setPayerSelectionStarted] = useState(false)
   const [acknowledged, setAcknowledged] = useState(false)
-  const [quote, setQuote] = useState<GasQuote>()
+  const [quote, setQuote] = useState<GasQuote & { connectionId: typeof sponsorWallet.connectionId }>()
   const [txHash, setTxHash] = useState<Hex>()
   const [submissionUnknown, setSubmissionUnknown] = useState<Address>()
   const [recoveryHash, setRecoveryHash] = useState('')
@@ -90,6 +113,10 @@ export default function App() {
   const restartDialog = useRef<HTMLDialogElement>(null)
   const actionLock = useRef(Boolean(initialFragment))
   const formVersion = useRef(0)
+  const syncingWallets = wallet.syncing || sponsorWallet.syncing
+  const controlsBusy = Boolean(busy) || syncingWallets
+  const sourceNetworkBlocked = Boolean(wallet.error && wallet.chainId !== selectedChainId)
+  const sponsorNetworkBlocked = Boolean(sponsorWallet.error && sponsorWallet.chainId !== selectedChainId)
   const network = getNetwork(selectedChainId)
   const nativeCurrency = network.chain.nativeCurrency
   const sourceAddress = signed?.intent.source ?? prepared?.intent.source ?? wallet.address
@@ -100,18 +127,18 @@ export default function App() {
     queryFn: sourceAddress ? async () => { await validateSource(selectedChainId, sourceAddress); return true } : skipToken,
     enabled: Boolean(sourceAddress && checkingAccounts),
   })
-  const sponsorAddress = signed && wallet.address?.toLowerCase() !== signed.intent.source.toLowerCase() ? wallet.address : null
+  const sponsorAddress = sponsorWallet.address
   const sponsorCheck = useQuery({
     ...accountCheckOptions,
-    queryKey: ['sponsor-account', selectedChainId, sponsorAddress?.toLowerCase(), signed?.intent.source.toLowerCase()],
-    queryFn: sponsorAddress && signed ? async () => { await validateSponsor(selectedChainId, sponsorAddress, signed.intent.source); return true } : skipToken,
-    enabled: Boolean(sponsorAddress && checkingAccounts),
+    queryKey: ['sponsor-account', selectedChainId, sponsorAddress?.toLowerCase(), sourceAddress?.toLowerCase()],
+    queryFn: sponsorAddress && sourceAddress ? async () => { await validateSponsor(selectedChainId, sponsorAddress, sourceAddress); return true } : skipToken,
+    enabled: Boolean(sponsorAddress && sourceAddress && checkingAccounts),
   })
   // Cached success cannot unlock a new account/network or an in-flight refresh.
   const sourceReady = Boolean(sourceAddress && sourceCheck.isSuccess && !sourceCheck.isFetching && !sourceCheck.isPaused)
-  const sponsorReady = Boolean(sponsorAddress && sponsorCheck.isSuccess && !sponsorCheck.isFetching && !sponsorCheck.isPaused)
-  const sourceStatus = sourceAddress && checkingAccounts ? <AccountStatus checking={sourceCheck.isPending || sourceCheck.isFetching} paused={sourceCheck.isPaused} error={sourceCheck.error} label="sending account" retry={() => void sourceCheck.refetch()} disabled={Boolean(busy)} /> : null
-  const sponsorStatus = sponsorAddress && checkingAccounts ? <AccountStatus checking={sponsorCheck.isPending || sponsorCheck.isFetching} paused={sponsorCheck.isPaused} error={sponsorCheck.error} label="paying account" retry={() => void sponsorCheck.refetch()} disabled={Boolean(busy)} /> : null
+  const sponsorReady = Boolean(sponsorAddress && sourceAddress && sponsorCheck.isSuccess && !sponsorCheck.isFetching && !sponsorCheck.isPaused)
+  const sourceStatus = sourceAddress && checkingAccounts ? <AccountStatus checking={sourceCheck.isPending || sourceCheck.isFetching} paused={sourceCheck.isPaused} error={sourceCheck.error} label="sending account" retry={() => void sourceCheck.refetch()} disabled={controlsBusy} /> : null
+  const sponsorStatus = sponsorAddress && sourceAddress && checkingAccounts ? <AccountStatus checking={sponsorCheck.isPending || sponsorCheck.isFetching} paused={sponsorCheck.isPaused} error={sponsorCheck.error} label="paying account" retry={() => void sponsorCheck.refetch()} disabled={controlsBusy} /> : null
   const actionError = error === sourceCheck.error?.message || error === sponsorCheck.error?.message ? '' : error
   const assetAddress = assetChoice === 'wrapped' ? network.wrappedNative : customAddress
   const selectedAsset: Asset | undefined = assetChoice === 'native' ? { kind: 'native' } : isAddress(assetAddress) && assetAddress !== zeroAddress ? { kind: 'erc20', address: getAddress(assetAddress) } : undefined
@@ -126,8 +153,8 @@ export default function App() {
   const assetLoading = Boolean(wallet.address && selectedAsset && !prepared && !signed && (assetCheck.isPending || assetCheck.isFetching))
   const assetSymbol = assetInfo?.symbol || (assetChoice === 'native' ? nativeCurrency.symbol : assetChoice === 'wrapped' ? `W${nativeCurrency.symbol}` : '')
   const step = signed ? 3 : prepared ? 2 : 1
-  const activeQuote = quote && quote.chainId === signed?.intent.chainId && wallet.address?.toLowerCase() === quote.sponsor.toLowerCase() ? quote : undefined
-  const isSource = Boolean(signed && wallet.address?.toLowerCase() === signed.intent.source.toLowerCase())
+  const activeQuote = quote && quote.chainId === signed?.intent.chainId && sponsorWallet.address?.toLowerCase() === quote.sponsor.toLowerCase() && sponsorWallet.connectionId === quote.connectionId ? quote : undefined
+  const isSource = Boolean(signed && sponsorWallet.address?.toLowerCase() === signed.intent.source.toLowerCase())
   const isPreparedSource = Boolean(prepared && wallet.address?.toLowerCase() === prepared.intent.source.toLowerCase())
   const confirmed = result?.status === 'confirmed'
   const failed = result?.status === 'failed'
@@ -160,7 +187,12 @@ export default function App() {
     return () => window.clearTimeout(timer)
   }, [quote])
 
-  useEffect(() => { setError('') }, [wallet.address, selectedChainId])
+  useEffect(() => { setError('') }, [wallet.address, sponsorWallet.address, selectedChainId])
+
+  useEffect(() => {
+    if (choosingWallet) walletDialog.current?.showModal()
+    else walletDialog.current?.close()
+  }, [choosingWallet])
 
   useEffect(() => {
     if (restartModal) restartDialog.current?.showModal()
@@ -181,18 +213,15 @@ export default function App() {
     finally { actionLock.current = false; setBusy('') }
   }
 
-  function openWallet() {
-    void run('Opening wallet…', () => wallet.address ? wallet.manageWallet() : wallet.connect())
+  function chooseWallet(role: 'source' | 'sponsor') {
+    if (!actionLock.current) setChoosingWallet(role)
   }
 
-  async function selectPayingWallet() {
-    await run('Opening wallets…', async () => {
-      if (!signed || txHash || submissionUnknown) return
-      setQuote(undefined)
-      setPayerSelectionStarted(true)
-      // The authorization is independent of the wallet connection that created it.
-      await wallet.connect({ replace: true })
-    })
+  function connectWallet(id: string) {
+    if (!choosingWallet) return
+    const selected = choosingWallet === 'source' ? wallet : sponsorWallet
+    setChoosingWallet(null)
+    void run('Connecting wallet…', () => selected.connect(id))
   }
 
   function edit(update: () => void) {
@@ -217,7 +246,7 @@ export default function App() {
 
   async function sign() {
     await run('Sign in your wallet…', async () => {
-      if (!sourceReady) return
+      if (!sourceReady || syncingWallets || sourceNetworkBlocked) return
       if (!prepared || !acknowledged || !isPreparedSource) throw new Error('Reconnect your Fomo account to sign this transfer.')
       await validateSource(prepared.intent.chainId, prepared.intent.source)
       if (walletRef.current.address?.toLowerCase() !== prepared.intent.source.toLowerCase()) throw new Error('Reconnect the sending account to sign.')
@@ -230,24 +259,26 @@ export default function App() {
 
   async function estimate() {
     await run('Estimating fees…', async () => {
-      const sponsor = wallet.address
-      if (!sourceReady || !sponsorReady) return
+      const sponsor = sponsorWallet.address
+      const connectionId = sponsorWallet.connectionId
+      if (!sourceReady || !sponsorReady || syncingWallets) return
       if (!signed || !sponsor || isSource) throw new Error('Connect another account to cover the fees.')
       const next = await quoteTransfer(signed, sponsor)
-      if (walletRef.current.address?.toLowerCase() !== sponsor.toLowerCase()) throw new Error('The fee-paying account changed. Estimate the fees again.')
-      setQuote(next)
+      if (sponsorRef.current.address?.toLowerCase() !== sponsor.toLowerCase() || sponsorRef.current.connectionId !== connectionId) throw new Error('The fee-paying account changed. Estimate the fees again.')
+      setQuote({ ...next, connectionId })
     })
   }
 
   async function send() {
     await run('Confirm in your wallet…', async () => {
       if (submissionUnknown || txHash) throw new Error('Check the existing transaction before trying again.')
-      if (!sourceReady || !sponsorReady) return
+      if (!sourceReady || !sponsorReady || syncingWallets || sponsorNetworkBlocked) return
       if (!signed || !activeQuote) throw new Error('Estimate fees with the paying account before continuing.')
       await Promise.all([validateSource(signed.intent.chainId, signed.intent.source), validateSponsor(signed.intent.chainId, activeQuote.sponsor, signed.intent.source)])
       if (Date.now() - activeQuote.quotedAt >= 60_000) { setQuote(undefined); return }
-      if (walletRef.current.address?.toLowerCase() !== activeQuote.sponsor.toLowerCase()) throw new Error('The paying account changed. Estimate the fees again.')
-      const provider = await wallet.ensureChain(signed.intent.chainId)
+      if (sponsorRef.current.address?.toLowerCase() !== activeQuote.sponsor.toLowerCase() || sponsorRef.current.connectionId !== activeQuote.connectionId) throw new Error('The paying account changed. Estimate the fees again.')
+      const provider = await sponsorWallet.ensureChain(signed.intent.chainId)
+      if (sponsorRef.current.connectionId !== activeQuote.connectionId) throw new Error('The paying account changed. Estimate the fees again.')
       let hash: Hex
       try { hash = await broadcastTransfer(signed, activeQuote, provider) }
       catch (reason) {
@@ -284,7 +315,7 @@ export default function App() {
   function reset() {
     if (actionLock.current) return
     formVersion.current += 1
-    setPrepared(undefined); setSigned(undefined); setPayerSelectionStarted(false); setQuote(undefined); setResult(undefined); setTxHash(undefined); setSubmissionUnknown(undefined); setRecoveryHash('')
+    setPrepared(undefined); setSigned(undefined); setQuote(undefined); setResult(undefined); setTxHash(undefined); setSubmissionUnknown(undefined); setRecoveryHash('')
     setAssetChoice('wrapped'); setCustomAddress('')
     setTokenTouched(false); setRecipientTouched(false)
     setAmount(''); setRecipient(''); setAcknowledged(false); setShareUrl(''); setCopied(false); setError(''); setRestartModal(false)
@@ -293,7 +324,7 @@ export default function App() {
   return <div className="app-shell">
     <header className="site-header">
       <a href="/" className="brand" aria-label="Passage, home" onClick={event => { event.preventDefault(); if (!busy) signed && !confirmed ? setRestartModal(true) : reset() }}><span className="brand-symbol" aria-hidden="true"><i /><i /></span>passage<span className="brand-dot">.</span></a>
-      <div className="header-right"><select className="network-select" aria-label="Network" value={selectedChainId} disabled={Boolean(busy) || Boolean(prepared) || Boolean(signed)} onChange={event => { const next = Number(event.target.value); if (next !== selectedChainId) edit(() => { setSelectedChainId(next); setAssetChoice('wrapped'); setCustomAddress(''); setAmount(''); setTokenTouched(false) }) }}>{NETWORKS.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select>{wallet.address || prepared || signed ? <button className="wallet-button" aria-label={wallet.address ? `Manage wallet ${shortAddress(wallet.address)}` : "Connect a wallet"} disabled={Boolean(busy)} onClick={() => openWallet()}><Icon name="wallet" size={17} /><span>{wallet.address ? shortAddress(wallet.address) : 'Connect a wallet'}</span></button> : null}</div>
+      <div className="header-right"><select className="network-select" aria-label="Network" value={selectedChainId} disabled={controlsBusy || Boolean(prepared) || Boolean(signed)} onChange={event => { const next = Number(event.target.value); if (next !== selectedChainId) edit(() => { setSelectedChainId(next); setAssetChoice('wrapped'); setCustomAddress(''); setAmount(''); setTokenTouched(false) }) }}>{NETWORKS.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></div>
     </header>
 
     <main className="transfer-main">
@@ -301,21 +332,25 @@ export default function App() {
       <section className="transfer-card" aria-label="Asset transfer" aria-busy={Boolean(busy)}>
         <ol className="stepper" aria-label="Transfer steps">{['Prepare', 'Sign', 'Send'].map((name, index) => <li key={name} className={step === index + 1 ? 'current' : step > index + 1 ? 'complete' : ''} aria-current={step === index + 1 ? 'step' : undefined}><span className="step-number">{step > index + 1 ? <Icon name="check" size={13} /> : index + 1}</span><span>{name}</span></li>)}</ol>
         <div className="card-content">
+          <div className="wallet-roles" aria-label="Connected wallets">
+            <WalletCard label="Fomo wallet" wallet={wallet} chainId={selectedChainId} disabled={controlsBusy} onChoose={() => chooseWallet('source')} onDisconnect={() => void run('Disconnecting Fomo wallet…', wallet.disconnect)} onSync={() => void run('Switching Fomo wallet network…', async () => { await wallet.ensureChain(selectedChainId) })} />
+            <WalletCard label="Sponsor wallet" wallet={sponsorWallet} chainId={selectedChainId} disabled={controlsBusy} onChoose={() => chooseWallet('sponsor')} onDisconnect={() => void run('Disconnecting sponsor wallet…', sponsorWallet.disconnect)} onSync={() => void run('Switching sponsor wallet network…', async () => { await sponsorWallet.ensureChain(selectedChainId) })} />
+          </div>
           {!prepared && !signed ? <>
             <div className="section-heading"><h2>Send assets</h2></div>
             <form onSubmit={event => { event.preventDefault(); void prepare() }}>
-              <div className="field"><span className="field-label">Fomo account</span><button type="button" className={`source-wallet ${wallet.address ? 'connected' : ''}`} disabled={Boolean(busy)} onClick={() => openWallet()}><span className="source-icon"><Icon name="wallet" /></span><span><strong>{wallet.address ? shortAddress(wallet.address) : 'Connect wallet'}</strong>{wallet.address ? <small>{wallet.walletName}</small> : null}</span><Icon name="arrow" size={18} /></button></div>
               {sourceStatus}
-              <div className="field"><label htmlFor="asset-select">Asset</label><div className="select-wrap"><span className="token-symbol" aria-hidden="true">◇</span><select id="asset-select" value={assetChoice} disabled={Boolean(busy)} onChange={event => { const next = event.target.value as 'native' | 'wrapped' | 'custom'; if (next !== assetChoice) edit(() => { setAssetChoice(next); setCustomAddress(''); setAmount(''); setTokenTouched(false) }) }}><option value="native">{nativeCurrency.symbol} · Native</option><option value="wrapped">{`W${nativeCurrency.symbol} · Wrapped ${nativeCurrency.symbol}`}</option><option value="custom">Another ERC-20 token</option></select></div></div>
-              {assetChoice === 'custom' ? <div className="field"><label htmlFor="token-address">Contract address</label><input id="token-address" className="mono" onBlur={() => setTokenTouched(true)} aria-invalid={Boolean(tokenError)} aria-describedby={tokenError ? 'token-error' : undefined} placeholder="0x…" value={customAddress} disabled={Boolean(busy)} onChange={event => { const next = event.target.value.trim(); if (next !== customAddress) edit(() => { setCustomAddress(next); setAmount(''); setTokenTouched(false) }) }} autoComplete="off" spellCheck={false} required /></div> : null}
+              {sponsorStatus}
+              <div className="field"><label htmlFor="asset-select">Asset</label><div className="select-wrap"><span className="token-symbol" aria-hidden="true">◇</span><select id="asset-select" value={assetChoice} disabled={controlsBusy} onChange={event => { const next = event.target.value as 'native' | 'wrapped' | 'custom'; if (next !== assetChoice) edit(() => { setAssetChoice(next); setCustomAddress(''); setAmount(''); setTokenTouched(false) }) }}><option value="native">{nativeCurrency.symbol} · Native</option><option value="wrapped">{`W${nativeCurrency.symbol} · Wrapped ${nativeCurrency.symbol}`}</option><option value="custom">Another ERC-20 token</option></select></div></div>
+              {assetChoice === 'custom' ? <div className="field"><label htmlFor="token-address">Contract address</label><input id="token-address" className="mono" onBlur={() => setTokenTouched(true)} aria-invalid={Boolean(tokenError)} aria-describedby={tokenError ? 'token-error' : undefined} placeholder="0x…" value={customAddress} disabled={controlsBusy} onChange={event => { const next = event.target.value.trim(); if (next !== customAddress) edit(() => { setCustomAddress(next); setAmount(''); setTokenTouched(false) }) }} autoComplete="off" spellCheck={false} required /></div> : null}
               {tokenError ? <p id="token-error" className="notice error" role="alert">{tokenError}</p> : null}
-              <div className="field"><div className="label-row"><label htmlFor="amount">Amount</label><span className="balance">{assetLoading ? 'Loading balance…' : assetInfo ? `Available: ${formatUnits(assetInfo.balance, assetInfo.decimals)} ${assetInfo.symbol}` : '—'}</span></div><div className="amount-input"><input id="amount" inputMode="decimal" aria-invalid={Boolean(amountError)} aria-describedby={amountError ? 'amount-error' : undefined} placeholder="0.00" autoComplete="off" value={amount} disabled={Boolean(busy)} onChange={event => edit(() => setAmount(event.target.value.replace(',', '.')))} required /><span className="amount-unit">{assetSymbol}</span><button type="button" className="max-button" disabled={!assetInfo || assetLoading || assetInfo.balance === 0n || Boolean(busy)} onClick={() => edit(() => { if (assetInfo) setAmount(formatUnits(assetInfo.balance, assetInfo.decimals)) })}>Max</button></div></div>
+              <div className="field"><div className="label-row"><label htmlFor="amount">Amount</label><span className="balance">{assetLoading ? 'Loading balance…' : assetInfo ? `Available: ${formatUnits(assetInfo.balance, assetInfo.decimals)} ${assetInfo.symbol}` : '—'}</span></div><div className="amount-input"><input id="amount" inputMode="decimal" aria-invalid={Boolean(amountError)} aria-describedby={amountError ? 'amount-error' : undefined} placeholder="0.00" autoComplete="off" value={amount} disabled={controlsBusy} onChange={event => edit(() => setAmount(event.target.value.replace(',', '.')))} required /><span className="amount-unit">{assetSymbol}</span><button type="button" className="max-button" disabled={!assetInfo || assetLoading || assetInfo.balance === 0n || controlsBusy} onClick={() => edit(() => { if (assetInfo) setAmount(formatUnits(assetInfo.balance, assetInfo.decimals)) })}>Max</button></div></div>
               {amountError ? <p id="amount-error" className="notice error" role="alert">{amountError}</p> : null}
               {sourceReady && assetInfo && assetInfo.reservedBalance > 0n ? <p className="field-note reserve-note">{formatUnits(assetInfo.reservedBalance, assetInfo.decimals)} {assetInfo.symbol} is reserved by Monad and cannot be transferred.</p> : null}
-              <div className="field recipient-field"><label htmlFor="recipient">Recipient address</label><input id="recipient" className="mono" onBlur={() => setRecipientTouched(true)} aria-invalid={Boolean(recipientError)} aria-describedby={recipientError ? 'recipient-error' : undefined} placeholder="0x…" autoComplete="off" spellCheck={false} value={recipient} disabled={Boolean(busy)} onChange={event => edit(() => setRecipient(event.target.value.trim()))} required /></div>
+              <div className="field recipient-field"><label htmlFor="recipient">Recipient address</label><input id="recipient" className="mono" onBlur={() => setRecipientTouched(true)} aria-invalid={Boolean(recipientError)} aria-describedby={recipientError ? 'recipient-error' : undefined} placeholder="0x…" autoComplete="off" spellCheck={false} value={recipient} disabled={controlsBusy} onChange={event => edit(() => setRecipient(event.target.value.trim()))} required /></div>
               {recipientError ? <p id="recipient-error" className="notice error" role="alert">{recipientError}</p> : null}
-              {assetError ? <div className="notice error" role="alert"><span>{assetError}</span><button type="button" className="text-button" disabled={Boolean(busy) || assetLoading} onClick={() => void assetCheck.refetch()}>Retry balance</button></div> : null}
-              <Button type="submit" className="primary full" disabled={Boolean(busy) || !sourceReady || assetLoading || !wallet.address || !assetInfo || !amount || !isAddress(recipient) || Boolean(amountError || recipientError || tokenError)} busy={Boolean(busy)}>{busy || 'Review transfer'}{!busy ? <Icon name="arrow" size={18} /> : null}</Button>
+              {assetError ? <div className="notice error" role="alert"><span>{assetError}</span><button type="button" className="text-button" disabled={controlsBusy || assetLoading} onClick={() => void assetCheck.refetch()}>Retry balance</button></div> : null}
+              <Button type="submit" className="primary full" disabled={controlsBusy || !sourceReady || assetLoading || !wallet.address || !assetInfo || !amount || !isAddress(recipient) || Boolean(amountError || recipientError || tokenError)} busy={Boolean(busy)}>{busy || 'Review transfer'}{!busy ? <Icon name="arrow" size={18} /> : null}</Button>
             </form>
           </> : null}
 
@@ -323,10 +358,10 @@ export default function App() {
             <div className="section-heading"><h2>Review transfer</h2></div>
             <TransferSummary transfer={prepared} />
             {sourceStatus}
-            <label className="acknowledgement"><input type="checkbox" checked={acknowledged} disabled={Boolean(busy)} onChange={event => setAcknowledged(event.target.checked)} /><span>I checked the recipient and understand this authorization does not expire.</span></label>
+            <label className="acknowledgement"><input type="checkbox" checked={acknowledged} disabled={controlsBusy} onChange={event => setAcknowledged(event.target.checked)} /><span>I checked the recipient and understand this authorization does not expire.</span></label>
             {!isPreparedSource ? <p className="notice">Reconnect the sending account to sign.</p> : null}
-            <Button className="primary full" disabled={Boolean(busy) || !sourceReady || !acknowledged || !isPreparedSource} busy={Boolean(busy)} onClick={() => void sign()}>{busy || 'Sign transfer'}{!busy ? <Icon name="arrow" size={18} /> : null}</Button>
-            <button className="text-button full" disabled={Boolean(busy)} onClick={() => { setPrepared(undefined); setAcknowledged(false); setError('') }}>Edit transfer</button>
+            <Button className="primary full" disabled={controlsBusy || !sourceReady || sourceNetworkBlocked || !acknowledged || !isPreparedSource} busy={Boolean(busy)} onClick={() => void sign()}>{busy || 'Sign transfer'}{!busy ? <Icon name="arrow" size={18} /> : null}</Button>
+            <button className="text-button full" disabled={controlsBusy} onClick={() => { setPrepared(undefined); setAcknowledged(false); setError('') }}>Edit transfer</button>
           </> : null}
 
           {signed ? <>
@@ -337,32 +372,38 @@ export default function App() {
               <p className="notice" role="status">Your transaction may already be pending. Check the paying wallet before sending again.</p>
               <a className="transaction-link" href={`${getNetwork(signed.intent.chainId).explorer}/address/${submissionUnknown}`} target="_blank" rel="noreferrer"><span>Wallet activity <span className="mono">{shortAddress(submissionUnknown)}</span></span><Icon name="external" size={16} /></a>
               <form onSubmit={event => { event.preventDefault(); void recoverSubmission() }}>
-                <div className="field"><label htmlFor="recovery-hash">Transaction hash</label><input id="recovery-hash" className="mono" value={recoveryHash} onChange={event => setRecoveryHash(event.target.value.trim())} placeholder="0x…" spellCheck={false} autoComplete="off" disabled={Boolean(busy)} required pattern="0x[0-9a-fA-F]{64}" /></div>
-                <Button type="submit" className="primary full" disabled={Boolean(busy) || !/^0x[0-9a-fA-F]{64}$/.test(recoveryHash)} busy={Boolean(busy)}>{busy || 'Check transaction'}</Button>
+                <div className="field"><label htmlFor="recovery-hash">Transaction hash</label><input id="recovery-hash" className="mono" value={recoveryHash} onChange={event => setRecoveryHash(event.target.value.trim())} placeholder="0x…" spellCheck={false} autoComplete="off" disabled={controlsBusy} required pattern="0x[0-9a-fA-F]{64}" /></div>
+                <Button type="submit" className="primary full" disabled={controlsBusy || !/^0x[0-9a-fA-F]{64}$/.test(recoveryHash)} busy={Boolean(busy)}>{busy || 'Check transaction'}</Button>
               </form>
               <p className="signed-note">Closing this page does not revoke the signed authorization.</p>
             </> : !txHash ? <>
-              <div className="sponsor-section"><div className="label-row"><span className="field-label">Paying wallet</span>{sponsorReady ? <span className="connection-state">Ready</span> : null}</div><button className="source-wallet" aria-label={sponsorAddress ? 'Change paying wallet' : 'Select paying wallet'} disabled={Boolean(busy)} onClick={() => void selectPayingWallet()}><span className="source-icon"><Icon name="wallet" /></span><span><strong>{sponsorAddress ? shortAddress(sponsorAddress) : 'Select paying wallet'}</strong><small>{sponsorAddress ? `${wallet.walletName} · Change wallet` : `A different account with ${nativeCurrency.symbol}`}</small></span><Icon name="arrow" size={18} /></button></div>
-              {payerSelectionStarted && isSource && !busy ? <p className="notice" role="status">This is the sending account. Choose a different account in your wallet, then reconnect.</p> : null}
               {sponsorStatus}
               {activeQuote ? <div className="fee-review"><div><span>Fee budget</span><strong>{formatUnits(activeQuote.maxCost, nativeCurrency.decimals)} {nativeCurrency.symbol}</strong></div></div> : null}
-              {activeQuote ? <Button className="primary full" disabled={Boolean(busy) || !sourceReady || !sponsorReady} busy={Boolean(busy)} onClick={() => void send()}>{busy || 'Pay fees and send'}{!busy ? <Icon name="arrow" size={18} /> : null}</Button> : <Button className="primary full" disabled={Boolean(busy) || !sourceReady || !sponsorReady || !wallet.address || isSource} busy={Boolean(busy)} onClick={() => void estimate()}>{busy || 'Estimate fees'}{!busy ? <Icon name="arrow" size={18} /> : null}</Button>}
-              {activeQuote ? <button className="text-button full" disabled={Boolean(busy) || !sourceReady || !sponsorReady} onClick={() => void estimate()}>Refresh estimate</button> : null}
-              <div className="share-section"><button className="text-button" disabled={Boolean(busy)} onClick={() => void copyShare()}><Icon name={copied ? 'check' : 'copy'} size={15} />{copied ? 'Link copied' : 'Copy payment link'}</button></div>
+              {activeQuote ? <Button className="primary full" disabled={controlsBusy || !sourceReady || !sponsorReady || sponsorNetworkBlocked} busy={Boolean(busy)} onClick={() => void send()}>{busy || 'Pay fees and send'}{!busy ? <Icon name="arrow" size={18} /> : null}</Button> : <Button className="primary full" disabled={controlsBusy || !sourceReady || !sponsorReady || !sponsorWallet.address || isSource} busy={Boolean(busy)} onClick={() => void estimate()}>{busy || 'Estimate fees'}{!busy ? <Icon name="arrow" size={18} /> : null}</Button>}
+              {activeQuote ? <button className="text-button full" disabled={controlsBusy || !sourceReady || !sponsorReady} onClick={() => void estimate()}>Refresh estimate</button> : null}
+              <div className="share-section"><button className="text-button" disabled={controlsBusy} onClick={() => void copyShare()}><Icon name={copied ? 'check' : 'copy'} size={15} />{copied ? 'Link copied' : 'Copy payment link'}</button></div>
               {shareUrl ? <div className="share-link"><label htmlFor="share-link">Payment link</label><input id="share-link" readOnly value={shareUrl} onFocus={event => event.target.select()} /><p>Anyone with this link can submit this exact transfer.</p></div> : null}
               <p className="signed-note">Closing this page does not revoke the signed authorization.</p>
             </> : <>
               <a className="transaction-link" href={`${getNetwork(signed.intent.chainId).explorer}/tx/${txHash}`} target="_blank" rel="noreferrer"><span>View transaction <span className="mono">{shortAddress(txHash)}</span></span><Icon name="external" size={16} /></a>
               {result && !confirmed ? <p className="notice" role="status">{result.message}</p> : null}
-              {!confirmed ? <><Button className="primary full" busy={Boolean(busy)} disabled={Boolean(busy)} onClick={() => void run('Verifying delivery…', async () => setResult(await waitForTransfer(signed, txHash)))}>{busy || 'Check delivery again'}</Button>{failed ? <button className="text-button full" disabled={Boolean(busy)} onClick={() => setRestartModal(true)}>Start a new transfer</button> : null}</> : <button className="primary full" onClick={reset}>Make another transfer<Icon name="arrow" size={18} /></button>}
+              {!confirmed ? <><Button className="primary full" busy={Boolean(busy)} disabled={controlsBusy} onClick={() => void run('Verifying delivery…', async () => setResult(await waitForTransfer(signed, txHash)))}>{busy || 'Check delivery again'}</Button>{failed ? <button className="text-button full" disabled={controlsBusy} onClick={() => setRestartModal(true)}>Start a new transfer</button> : null}</> : <button className="primary full" onClick={reset}>Make another transfer<Icon name="arrow" size={18} /></button>}
             </>}
           </> : null}
-          {actionError || wallet.error ? <p className="notice error" role="alert">{actionError || wallet.error}</p> : null}
+          {actionError ? <p className="notice error" role="alert">{actionError}</p> : null}
           <span className="sr-only" role="status" aria-live="polite">{busy}</span>
         </div>
       </section>
     </main>
     <footer className="site-footer"><a href={network.explorer} target="_blank" rel="noreferrer">Explore the network<Icon name="external" size={12} /></a></footer>
+
+    <dialog ref={walletDialog} className="wallet-dialog connection-dialog" onCancel={() => setChoosingWallet(null)} aria-labelledby="wallet-selection-title">
+      <div className="dialog-heading"><h2 id="wallet-selection-title">{choosingWallet === 'source' ? `${wallet.address ? 'Change' : 'Connect'} Fomo wallet` : `${sponsorWallet.address ? 'Change' : 'Connect'} sponsor wallet`}</h2><button className="close-dialog" aria-label="Close wallet selection" onClick={() => setChoosingWallet(null)}>×</button></div>
+      <div className="wallet-options">
+        {wallet.availableWallets.filter(item => item.id !== 'walletConnect').map(item => <button key={item.id} className="source-wallet" onClick={() => connectWallet(item.id)}><span className="source-icon"><Icon name="wallet" /></span><span><strong>{item.name}</strong></span><Icon name="arrow" size={18} /></button>)}
+        <button className="source-wallet" aria-label="WalletConnect" onClick={() => connectWallet('walletConnect')}><span className="source-icon"><Icon name="wallet" /></span><span><strong>WalletConnect</strong><small>Mobile wallets and QR code</small></span><Icon name="arrow" size={18} /></button>
+      </div>
+    </dialog>
 
     <dialog ref={restartDialog} className="wallet-dialog" onCancel={() => setRestartModal(false)} aria-labelledby="restart-title"><div className="dialog-heading"><h2 id="restart-title">Leave this transfer?</h2></div><p className="dialog-description">Starting over does not revoke your signature. Save the payment link to return to this transfer.</p><button className="primary full" onClick={() => setRestartModal(false)}>Keep this transfer</button><button className="text-button full" onClick={reset}>Start over anyway</button></dialog>
   </div>

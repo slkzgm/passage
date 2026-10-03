@@ -16,8 +16,9 @@ import { currentTheme, setTheme, subscribeTheme } from './lib/theme'
 
 let sharedTransfer: Promise<SignedTransfer> | undefined
 const chainLogos: Record<number, string> = { [mainnet.id]: '/logos/eth.webp', [base.id]: '/logos/base.webp', [bsc.id]: '/logos/bnb-chain.webp', [monad.id]: '/logos/monad.webp', [robinhood.id]: '/logos/robinhood.webp' }
-// Wrapped assets reuse their native logo; the symbol tells them apart.
 const nativeLogos: Record<string, string> = { ETH: '/logos/eth.webp', BNB: '/logos/bnb.webp', MON: '/logos/monad.webp' }
+// WETH has its own logo; other wrapped assets reuse their native logo and the symbol tells them apart.
+const wrappedLogos: Record<string, string> = { ETH: '/logos/weth.webp' }
 // The customizable select draws option logos from this property (see styles.css).
 const logoStyle = (url: string | undefined) => (url ? { '--logo': `url(${url})` } : undefined) as CSSProperties | undefined
 const shortAddress = (value: string) => `${value.slice(0, 6)}…${value.slice(-4)}`
@@ -151,6 +152,7 @@ export default function App() {
   const sponsorNetworkBlocked = Boolean(sponsorWallet.error && sponsorWallet.chainId !== selectedChainId)
   const network = getNetwork(selectedChainId)
   const nativeCurrency = network.chain.nativeCurrency
+  const wrappedLogo = wrappedLogos[nativeCurrency.symbol] ?? nativeLogos[nativeCurrency.symbol]
   const sourceAddress = signed?.intent.source ?? prepared?.intent.source ?? wallet.address
   const checkingAccounts = !txHash && !submissionUnknown
   const sourceCheck = useQuery({
@@ -393,7 +395,7 @@ export default function App() {
                   <div className="amount-row">
                     <input id="amount" inputMode="decimal" aria-invalid={Boolean(amountError)} aria-describedby={amountError ? 'amount-error' : undefined} placeholder="0.00" autoComplete="off" value={amount} disabled={controlsBusy} onChange={event => edit(() => setAmount(event.target.value.replace(',', '.')))} required />
                     <label htmlFor="asset-select" className="sr-only">Asset</label>
-                    <span className="select-wrap asset-select">{assetChoice === 'custom' ? <span className="select-logo token-placeholder" aria-hidden="true" /> : <img className="select-logo" src={nativeLogos[nativeCurrency.symbol]} alt="" />}<select id="asset-select" value={assetChoice} disabled={controlsBusy} onChange={event => { const next = event.target.value as 'native' | 'wrapped' | 'custom'; if (next !== assetChoice) edit(() => { setAssetChoice(next); setCustomAddress(''); setAmount(''); setTokenTouched(false) }) }}><option value="native" style={logoStyle(nativeLogos[nativeCurrency.symbol])}>{nativeCurrency.symbol}</option><option value="wrapped" style={logoStyle(nativeLogos[nativeCurrency.symbol])}>{`W${nativeCurrency.symbol}`}</option><option value="custom" className="custom-token">{assetChoice === 'custom' && assetSymbol ? assetSymbol : 'Custom'}</option></select></span>
+                    <span className="select-wrap asset-select">{assetChoice === 'custom' ? <span className="select-logo token-placeholder" aria-hidden="true" /> : <img className="select-logo" src={assetChoice === 'wrapped' ? wrappedLogo : nativeLogos[nativeCurrency.symbol]} alt="" />}<select id="asset-select" value={assetChoice} disabled={controlsBusy} onChange={event => { const next = event.target.value as 'native' | 'wrapped' | 'custom'; if (next !== assetChoice) edit(() => { setAssetChoice(next); setCustomAddress(''); setAmount(''); setTokenTouched(false) }) }}><option value="native" style={logoStyle(nativeLogos[nativeCurrency.symbol])}>{nativeCurrency.symbol}</option><option value="wrapped" style={logoStyle(wrappedLogo)}>{`W${nativeCurrency.symbol}`}</option><option value="custom" className="custom-token">{assetChoice === 'custom' && assetSymbol ? assetSymbol : 'Custom'}</option></select></span>
                   </div>
                   <div className="balance-row"><span className="balance">{assetLoading ? 'Loading balance…' : assetInfo ? `Available: ${formatUnits(assetInfo.balance, assetInfo.decimals)} ${assetInfo.symbol}` : wallet.address ? '' : 'Connect a wallet to see your balance'}</span><button type="button" className="max-button" disabled={!assetInfo || assetLoading || assetInfo.balance === 0n || controlsBusy} onClick={() => edit(() => { if (assetInfo) setAmount(formatUnits(assetInfo.balance, assetInfo.decimals)) })}>Max</button></div>
                 </div>

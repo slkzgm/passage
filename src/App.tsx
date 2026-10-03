@@ -105,7 +105,9 @@ export default function App() {
   const [tokenTouched, setTokenTouched] = useState(false)
   const [recipientTouched, setRecipientTouched] = useState(false)
   const [amount, setAmount] = useState('')
-  const [recipient, setRecipient] = useState('')
+  const [recipientChoice, setRecipientChoice] = useState<'custom' | 'sponsor'>('custom')
+  const [customRecipient, setCustomRecipient] = useState('')
+  const recipient = recipientChoice === 'sponsor' ? sponsorWallet.address ?? '' : customRecipient
   const [prepared, setPrepared] = useState<PreparedTransfer>()
   const [signed, setSigned] = useState<SignedTransfer>()
   const [acknowledged, setAcknowledged] = useState(false)
@@ -258,6 +260,7 @@ export default function App() {
       const version = formVersion.current
       const next = await prepareTransfer({ chainId: selectedChainId, source, asset: selectedAsset, recipient: getAddress(recipient), amount })
       if (version !== formVersion.current || walletRef.current.address?.toLowerCase() !== source.toLowerCase()) throw new Error('The account changed. Review the transfer again.')
+      if (recipientChoice === 'sponsor' && sponsorRef.current.address?.toLowerCase() !== recipient.toLowerCase()) throw new Error('The recipient changed. Review the transfer again.')
       setPrepared(next)
       setAcknowledged(false)
     })
@@ -337,7 +340,7 @@ export default function App() {
     setPrepared(undefined); setSigned(undefined); setQuote(undefined); setResult(undefined); setTxHash(undefined); setSubmissionUnknown(undefined); setRecoveryHash('')
     setAssetChoice('wrapped'); setCustomAddress('')
     setTokenTouched(false); setRecipientTouched(false)
-    setAmount(''); setRecipient(''); setAcknowledged(false); setShareUrl(''); setCopied(false); setError(''); setRestartModal(false)
+    setAmount(''); setRecipientChoice('custom'); setCustomRecipient(''); setAcknowledged(false); setShareUrl(''); setCopied(false); setError(''); setRestartModal(false)
   }
 
   return <div className="app-shell">
@@ -366,7 +369,11 @@ export default function App() {
               <div className="field"><div className="label-row"><label htmlFor="amount">Amount</label><span className="balance">{assetLoading ? 'Loading balance…' : assetInfo ? `Available: ${formatUnits(assetInfo.balance, assetInfo.decimals)} ${assetInfo.symbol}` : '—'}</span></div><div className="amount-input"><input id="amount" inputMode="decimal" aria-invalid={Boolean(amountError)} aria-describedby={amountError ? 'amount-error' : undefined} placeholder="0.00" autoComplete="off" value={amount} disabled={controlsBusy} onChange={event => edit(() => setAmount(event.target.value.replace(',', '.')))} required /><span className="amount-unit">{assetSymbol}</span><button type="button" className="max-button" disabled={!assetInfo || assetLoading || assetInfo.balance === 0n || controlsBusy} onClick={() => edit(() => { if (assetInfo) setAmount(formatUnits(assetInfo.balance, assetInfo.decimals)) })}>Max</button></div></div>
               {amountError ? <p id="amount-error" className="notice error" role="alert">{amountError}</p> : null}
               {sourceReady && assetInfo && assetInfo.reservedBalance > 0n ? <p className="field-note reserve-note">{formatUnits(assetInfo.reservedBalance, assetInfo.decimals)} {assetInfo.symbol} is reserved by Monad and cannot be transferred.</p> : null}
-              <div className="field recipient-field"><label htmlFor="recipient">Recipient address</label><input id="recipient" className="mono" onBlur={() => setRecipientTouched(true)} aria-invalid={Boolean(recipientError)} aria-describedby={recipientError ? 'recipient-error' : undefined} placeholder="0x…" autoComplete="off" spellCheck={false} value={recipient} disabled={controlsBusy} onChange={event => edit(() => setRecipient(event.target.value.trim()))} required /></div>
+              <div className="field recipient-field">
+                <label htmlFor="recipient-select">Recipient</label>
+                <div className="select-wrap recipient-select"><select id="recipient-select" value={recipientChoice} disabled={controlsBusy} onChange={event => edit(() => { setRecipientChoice(event.target.value as 'custom' | 'sponsor'); setRecipientTouched(false) })}><option value="sponsor" disabled={!sponsorWallet.address}>Sponsor wallet</option><option value="custom">Another wallet</option></select></div>
+                {recipientChoice === 'sponsor' ? <output className="recipient-address mono" aria-label="Recipient address">{recipient || 'Connect a sponsor wallet.'}</output> : <><label htmlFor="recipient" className="sr-only">Recipient address</label><input id="recipient" className="mono" onBlur={() => setRecipientTouched(true)} aria-invalid={Boolean(recipientError)} aria-describedby={recipientError ? 'recipient-error' : undefined} placeholder="0x…" autoComplete="off" spellCheck={false} value={customRecipient} disabled={controlsBusy} onChange={event => edit(() => setCustomRecipient(event.target.value.trim()))} required /></>}
+              </div>
               {recipientError ? <p id="recipient-error" className="notice error" role="alert">{recipientError}</p> : null}
               {assetError ? <div className="notice error" role="alert"><span>{assetError}</span><button type="button" className="text-button" disabled={controlsBusy || assetLoading} onClick={() => void assetCheck.refetch()}>Retry balance</button></div> : null}
               <Button type="submit" className="primary full" disabled={controlsBusy || !sourceReady || assetLoading || !wallet.address || !assetInfo || !amount || !isAddress(recipient) || Boolean(amountError || recipientError || tokenError)} busy={Boolean(busy)}>{busy || 'Review transfer'}{!busy ? <Icon name="arrow" size={18} /> : null}</Button>

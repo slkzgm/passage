@@ -29,7 +29,7 @@ function network(chain: Chain, rpcUrls: readonly string[], wrappedNative: Addres
 }
 
 export const NETWORKS: readonly [NetworkConfig, ...NetworkConfig[]] = [
-  network(robinhood, ['https://rpc.mainnet.chain.robinhood.com'],
+  network({ ...robinhood, blockExplorers: { default: { name: 'Etherscan', url: 'https://robin.etherscan.io' } } }, ['https://rpc.mainnet.chain.robinhood.com'],
     '0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73',
     '0xa4b1c865a4a45b99ebaaf4bd06e0036ad489eb521786f59765e4e6a3c0524b03'),
   network(mainnet, ['https://ethereum-rpc.publicnode.com'],
